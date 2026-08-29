@@ -18,3 +18,11 @@
 - Transaction handling (COMMIT/ROLLBACK)
 - Additional data quality checks (FK integrity, reject table)
 - Audit/log table
+
+
+
+
+## Tech Stack
+- Python (pandas, requests)
+- PostgreSQL
+- Jupyter Notebook
