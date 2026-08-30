@@ -30,7 +30,7 @@
 
 
 
+<img width="404" height="815" alt="postgres - postgres - fakestore_warehouse" src="https://github.com/user-attachments/assets/dc9f0f1b-4bec-454c-b4cc-9c30e905d639" />
 
-<img width="404" height="815" alt="postgres - postgres - fakestore_warehouse" src="https://github.com/user-attachments/assets/7a848b45-5cae-481e-a469-ac40ff766b2c" />
-<img width="404" height="815" alt="postgres - postgres - fakestore_warehouse" src="https://github.com/user-attachments/assets/72d27aa7-28c4-4103-81e5-300289988037" />
+
 
