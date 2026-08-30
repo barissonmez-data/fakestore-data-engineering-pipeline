@@ -27,3 +27,10 @@
 - Python (pandas, requests)
 - PostgreSQL
 - Jupyter Notebook
+
+
+
+
+<img width="404" height="815" alt="postgres - postgres - fakestore_warehouse" src="https://github.com/user-attachments/assets/7a848b45-5cae-481e-a469-ac40ff766b2c" />
+<img width="404" height="815" alt="postgres - postgres - fakestore_warehouse" src="https://github.com/user-attachments/assets/72d27aa7-28c4-4103-81e5-300289988037" />
+
