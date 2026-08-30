@@ -12,6 +12,7 @@
 - Added SQL data quality checks
 - Built a watermark table for incremental loading
 - Implemented incremental load logic (WHERE date > watermark)
+- Idempotency: The pipeline was made resilient to repeated runs, ensuring that re-executing it does not create duplicate rows in the facts_a table. This is achieved by updating the last_load value in the water_mark table after each INSERT to reflect the most recent processed date — so subsequent runs only pick up new, previously unprocessed data.
 
 ## Next Steps
 - Pipeline orchestration (Python/Airflow automation)
