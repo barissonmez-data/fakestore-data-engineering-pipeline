@@ -110,7 +110,8 @@ def fake_store_pipeline():
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
     def process_products(fake_product):
-        list_yeni = []
+        yeni = []
+        gorulen = []
 
         for product in fake_product:
             rating = product['rating']
@@ -120,20 +121,32 @@ def fake_store_pipeline():
             product['count'] = count
             del product['rating']
 
-            tuple_hali = product['id'], product['title'], product['price'], product['category'],product['rate'],product['count'],product['image'],product['description']
-            list_yeni.append(tuple_hali)
+            if product['id'] not in gorulen:
+                tuple_hali = (
+                    product['id'],
+                    product['title'],
+                    product['price'],
+                    product['category'],
+                    product['rate'],
+                    product['count'],
+                    product['image'],
+                    product['description']
+                )
+                yeni.append(tuple_hali)
+                gorulen.append(product['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
         hook.run('TRUNCATE TABLE stg_products')
         hook.insert_rows(
             table='stg_products',
-            rows=list_yeni,
-            target_fields=['id', 'title', 'price','category','rate','count','image','description']
+            rows=yeni,
+            target_fields=['id', 'title', 'price', 'category', 'rate', 'count', 'image', 'description']
         )
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
     def process_users(fake_user):
         list_yeni = []
+        gorulen = []
 
         for user in fake_user:
             name = user['name']
@@ -155,8 +168,23 @@ def fake_store_pipeline():
             del user['address']
 
             del user['__v']
-            tuple_hali = user['id'], user['email'], user['username'], user['password'], user['phone'], user['firstname'], user['lastname'], user['city'], user['street'], user['number'], user['zip']
-            list_yeni.append(tuple_hali)
+
+            if user['id'] not in gorulen:
+                tuple_hali = (
+                    user['id'],
+                    user['email'],
+                    user['username'],
+                    user['password'],
+                    user['phone'],
+                    user['firstname'],
+                    user['lastname'],
+                    user['city'],
+                    user['street'],
+                    user['number'],
+                    user['zip']
+                )
+                list_yeni.append(tuple_hali)
+                gorulen.append(user['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
         hook.run('TRUNCATE TABLE stg_user')
@@ -169,23 +197,31 @@ def fake_store_pipeline():
     @task(retries=2, retry_delay=timedelta(minutes=2))
     def process_carts(fake_carts):
         yeni_list = []
+        gorulen = []
 
         for cart in fake_carts:
             for product in cart['products']:
-                
-                tuple_hali = cart['id'],cart['date'],cart['userId'],product['quantity'],product['productId']
-                yeni_list.append(tuple_hali)
+                anahtar = (cart['id'], product['productId'])
+
+                if anahtar not in gorulen:
+                    tuple_hali = (
+                        cart['id'],
+                        cart['date'],
+                        cart['userId'],
+                        product['quantity'],
+                        product['productId']
+                    )
+                    yeni_list.append(tuple_hali)
+                    gorulen.append(anahtar)
 
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE stg_carts' )
+        hook.run('TRUNCATE TABLE stg_carts')
+
         hook.insert_rows(
-            table = 'stg_carts',
-            rows  = yeni_list,
-            target_fields = ['id','date','userId','quantity','productId']
+            table='stg_carts',
+            rows=yeni_list,
+            target_fields=['id', 'date', 'userId', 'quantity', 'productId']
         )
-
-
-    
 
     user_data = users_check()
     extracted_users = extract_user(user_data)
