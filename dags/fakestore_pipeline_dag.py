@@ -132,8 +132,9 @@ def fake_store_pipeline():
                     product['image'],
                     product['description']
                 )
-                yeni.append(tuple_hali)
-                gorulen.append(product['id'])
+                if None not in tuple_hali:
+                    yeni.append(tuple_hali)
+                    gorulen.append(product['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
         hook.run('TRUNCATE TABLE stg_products')
@@ -183,8 +184,9 @@ def fake_store_pipeline():
                     user['number'],
                     user['zip']
                 )
-                list_yeni.append(tuple_hali)
-                gorulen.append(user['id'])
+                if None not in tuple_hali:
+                    list_yeni.append(tuple_hali)
+                    gorulen.append(user['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
         hook.run('TRUNCATE TABLE stg_user')
@@ -211,8 +213,9 @@ def fake_store_pipeline():
                         product['quantity'],
                         product['productId']
                     )
-                    yeni_list.append(tuple_hali)
-                    gorulen.append(anahtar)
+                    if None not in tuple_hali:
+                        yeni_list.append(tuple_hali)
+                        gorulen.append(anahtar)
 
         hook = PostgresHook(postgres_conn_id='postgres')
         hook.run('TRUNCATE TABLE stg_carts')
