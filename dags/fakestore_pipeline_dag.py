@@ -49,6 +49,68 @@ def fake_store_pipeline():
         zip text
         )''')
 
+    # --- Şema: 3 dim create'inden önce çalışması gereken tek task ---
+    create_schema = SQLExecuteQueryOperator(
+        task_id='create_schema',
+        conn_id='postgres',
+        sql='CREATE SCHEMA IF NOT EXISTS fakestore_warehouse')
+
+    # --- Dimension tabloları: 3 AYRI task, her biri kendi DDL'i ---
+    create_date_dim = SQLExecuteQueryOperator(
+        task_id='create_date_dim',
+        conn_id='postgres',
+        sql='''CREATE TABLE IF NOT EXISTS fakestore_warehouse.date_dim (
+        "date" timestamp NULL,
+        date_id int4 GENERATED ALWAYS AS IDENTITY,
+        CONSTRAINT date_dim_pkey PRIMARY KEY (date_id)
+        )''')
+
+    create_product_dim = SQLExecuteQueryOperator(
+        task_id='create_product_dim',
+        conn_id='postgres',
+        sql='''CREATE TABLE IF NOT EXISTS fakestore_warehouse.product_dim (
+        productid int4 NULL,
+        product_key int4 GENERATED ALWAYS AS IDENTITY,
+        title text NULL,
+        description text NULL,
+        category text NULL,
+        rate numeric NULL,
+        count int4 NULL,
+        CONSTRAINT product_dim_pkey PRIMARY KEY (product_key)
+        )''')
+
+    create_user_dim = SQLExecuteQueryOperator(
+        task_id='create_user_dim',
+        conn_id='postgres',
+        sql='''CREATE TABLE IF NOT EXISTS fakestore_warehouse.user_dim (
+        user_key int4 GENERATED ALWAYS AS IDENTITY,
+        userid int4 NULL,
+        username text NULL,
+        firstname text NULL,
+        lastname text NULL,
+        phone text NULL,
+        street text NULL,
+        zipcode text NULL,
+        "number" int4 NULL,
+        email text NULL,
+        city text NULL,
+        CONSTRAINT user_dim_pkey PRIMARY KEY (user_key)
+        )''')
+
+
+    create_facts_a = SQLExecuteQueryOperator(
+        task_id='create_facts_a',
+        conn_id='postgres',
+        sql='''CREATE TABLE IF NOT EXISTS fakestore_warehouse.facts_a (
+        quantity int4 NULL,
+        price numeric NULL,
+        cart_line_key int4 GENERATED ALWAYS AS IDENTITY,
+        product_key int4 NULL,
+        user_key int4 NULL,
+        date_id int4 NULL,
+        CONSTRAINT facts_a_pkey PRIMARY KEY (cart_line_key)
+     )''')
+
     @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
     def users_check() -> PokeReturnValue:
         import requests
@@ -226,21 +288,96 @@ def fake_store_pipeline():
             target_fields=['id', 'date', 'userId', 'quantity', 'productId']
         )
 
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def fill_product_dim():
+        hook = PostgresHook(postgres_conn_id='postgres')
+        hook.run('TRUNCATE TABLE fakestore_warehouse.product_dim')
+        hook.run('''
+               INSERT INTO fakestore_warehouse.product_dim
+              (productid, title, description, category, rate, count)
+
+               SELECT id, title, description, category, rate, count
+
+               FROM stg_products
+
+        ''')
+
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def fill_user_dim():
+      hook = PostgresHook(postgres_conn_id='postgres')
+      hook.run('TRUNCATE TABLE fakestore_warehouse.user_dim')
+      hook.run('''
+        INSERT INTO fakestore_warehouse.user_dim
+        (userid, username, firstname, lastname, phone, street, zipcode, number, email, city)
+        SELECT id, username, firstname, lastname, phone, street, zip, number, email, city
+        FROM stg_user
+    ''')
+
+
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def fill_facts():
+      hook = PostgresHook(postgres_conn_id='postgres')
+      hook.run('TRUNCATE TABLE fakestore_warehouse.facts_a')
+      hook.run('''
+        INSERT INTO fakestore_warehouse.facts_a
+        (quantity, price, product_key, user_key, date_id)
+        SELECT quantity, price, product_key, user_key, date_id
+        FROM stg_carts
+        JOIN fakestore_warehouse.product_dim ON stg_carts.productId = product_dim.productid
+        JOIN stg_products ON stg_carts.productId = stg_products.id
+        JOIN fakestore_warehouse.user_dim ON stg_carts.userId = user_dim.userid
+        JOIN fakestore_warehouse.date_dim ON stg_carts.date = date_dim.date
+    ''')
+
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def fill_date_dim():
+      hook = PostgresHook(postgres_conn_id='postgres')
+      hook.run('TRUNCATE TABLE fakestore_warehouse.date_dim')
+      hook.run('''
+        INSERT INTO fakestore_warehouse.date_dim
+        (date)
+        SELECT DISTINCT date FROM stg_carts
+    ''')
+
     user_data = users_check()
     extracted_users = extract_user(user_data)
-    process_users(extracted_users)
 
     product_data = product_check()
     extracted_products = extract_products(product_data)
-    process_products(extracted_products)
 
     carts_data = carts_check()
     extracted_carts = extract_carts(carts_data)
-    process_carts(extracted_carts)
 
+    # staging create'ler -> ilgili extraction/sensor
     create_user_table >> user_data
     create_products_table >> product_data
     create_table >> carts_data
 
+    # Her fill fonksiyonu TEK KERE çağrılıp değişkene atanıyor.
+    # Aynı fonksiyonu iki kez çağırmak Airflow'da iki AYRI task (__1 ekiyle) oluşturur.
+    product_filled = fill_product_dim()
+    user_filled = fill_user_dim()
+    date_filled = fill_date_dim()
+
+    # staging fill zinciri (extraction -> fill)
+    process_products(extracted_products) >> product_filled
+    process_users(extracted_users) >> user_filled
+    process_carts(extracted_carts) >> date_filled
+
+    # şema -> 3 dim create (birbirinden bağımsız, sadece şemayı bekler)
+    create_schema >> create_date_dim
+    create_schema >> create_product_dim
+    create_schema >> create_user_dim
+
+    # dim create -> ilgili dim fill (aynı task'a ikinci bağımlılık)
+    create_product_dim >> product_filled
+    create_user_dim >> user_filled
+    create_date_dim >> date_filled
+
+    facts_filled = fill_facts()
+
+    [product_filled, user_filled, date_filled] >> facts_filled
+    create_schema >> create_facts_a
+    create_facts_a >> facts_filled
 
 fake_store_pipeline()
