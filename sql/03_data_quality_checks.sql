@@ -30,7 +30,16 @@ HAVING count(*)>1
 
 
 
-
+--check for duplicate rows in stg_products by id 
 select id,price,category, count(*) from fakestore_project.stg_products 
 group by id,category ,price
 HAVING count(*)>1
+
+
+
+
+
+-- check duplicates for stg_user 
+select username,number,city,id , count(*) from fakestore_project.stg_user
+group by username,number,city,id
+having count(*)>1
