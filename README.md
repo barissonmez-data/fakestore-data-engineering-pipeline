@@ -1,8 +1,8 @@
 # Fake Store Data Engineering Pipeline
 
-An end-to-end batch data engineering project that extracts product, user and cart data from the Fake Store API, transforms nested JSON data with Python, and loads it into a PostgreSQL dimensional warehouse.
+An end-to-end batch data engineering project that extracts product, user, and cart data from the Fake Store API, transforms nested JSON responses with Python, and loads the processed data into a PostgreSQL dimensional warehouse.
 
-Apache Airflow orchestrates the complete workflow, including API availability checks, table creation, extraction, transformation, staging loads, dimension loads and fact-table loading.
+Apache Airflow orchestrates the complete ETL workflow, including API availability checks, table creation, extraction, transformation, staging loads, dimension loads, and fact-table loading.
 
 ## Pipeline Overview
 
@@ -12,37 +12,42 @@ Fake Store API → Airflow API checks → Python transformations → PostgreSQL 
 
 * Built a single end-to-end Apache Airflow DAG for the complete ETL workflow
 * Added API availability checks before starting extraction tasks
-* Extracted data from the Products, Users and Carts API endpoints
-* Configured request timeouts and Airflow retry behavior for temporary API failures
+* Extracted data from the Products, Users, and Carts API endpoints
+* Configured HTTP request timeouts for external API calls
+* Added Airflow retry behavior for API, Python, and SQL tasks
+* Added task-level execution timeouts to prevent tasks from running indefinitely
+* Added operational logging for API checks, transformation record counts, and dimension and fact loading status
 * Processed API JSON responses using Python data structures
-* Flattened nested user, address and cart-product structures
-* Loaded cleaned data into PostgreSQL staging tables
-* Created a dedicated warehouse schema
-* Built product, user and date dimension tables
-* Created surrogate keys for warehouse dimensions
-* Joined staging data with dimension tables
-* Loaded quantity, price and dimension keys into the `facts_a` table
-* Filtered duplicate product and user records using their IDs
+* Flattened nested user, address, rating, and cart-product structures
+* Filtered product and user duplicates using their IDs
 * Filtered duplicate cart lines using the `cart_id + product_id` combination
 * Filtered records containing null values before staging loads
+* Loaded cleaned data into PostgreSQL staging tables
+* Created a dedicated warehouse schema
+* Built product, user, and date dimension tables
+* Created surrogate keys for warehouse dimensions
+* Joined staging data with dimension tables
+* Loaded quantity, price, and dimension keys into the `facts_a` table
 
 ## Current Loading Strategy
 
-The current Airflow V1 uses a full-refresh loading strategy. Staging, dimension and fact tables are cleared and rebuilt during each successful DAG run.
+The current Airflow V1 uses a full-refresh loading strategy. Staging, dimension, and fact tables are cleared and rebuilt during each successful DAG run.
 
-Because the tables are rebuilt instead of continuously appended, repeated successful runs do not accumulate duplicate fact rows. However, the `TRUNCATE` and `INSERT` operations still need to be executed inside a single database transaction to guarantee rollback if a load fails.
+Because the tables are rebuilt instead of continuously appended, repeated successful runs do not accumulate duplicate fact rows.
 
-The original local/Jupyter implementation included a `water_mark` table and incremental loading based on:
+The current implementation executes `TRUNCATE` and `INSERT` operations separately. Executing these operations inside a single database transaction with rollback support is planned for V2.
+
+The original local and Jupyter implementation included a `water_mark` table and incremental loading based on:
 
 ```sql
 WHERE date > watermark
 ```
 
-Watermark-based incremental loading has not yet been migrated into the current Airflow DAG. It is planned for V2 after transaction handling and additional data-quality controls are completed.
+Watermark-based incremental loading has not yet been migrated into the current Airflow DAG. It is planned for V2 after transaction handling and additional data-quality controls are implemented.
 
 ## Data Warehouse Schema
 
-The warehouse follows a dimensional model containing product, user and date dimensions connected to the `facts_a` table.
+The warehouse follows a dimensional model containing product, user, and date dimensions connected to the `facts_a` table.
 
 The `water_mark` table visible in the diagram belongs to the original local incremental-loading implementation. The current Airflow V1 follows the full-refresh strategy described above.
 
@@ -50,7 +55,11 @@ The `water_mark` table visible in the diagram belongs to the original local incr
 
 ## Airflow DAG Execution
 
-The screenshot below shows a successful end-to-end DAG run. Airflow completed the API checks, extraction, transformation, staging, dimension loading and fact-table loading. The final `fill_facts` task successfully loaded 14 rows into PostgreSQL.
+The screenshot below shows a successful end-to-end V1 DAG run.
+
+Airflow completed the API checks, table creation, extraction, transformation, staging loads, dimension loads, and fact-table loading. The successful run also verified the configured retry behavior, request timeouts, task-level execution timeouts, and operational logging.
+
+In the validated run, the final `fill_facts` task successfully loaded 14 rows into PostgreSQL.
 
 ![Successful Airflow DAG run](docs/images/airflow-dag-success.png)
 
@@ -81,15 +90,21 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Open the Airflow web interface using the host port shown for the Airflow service.
+Open the Airflow web interface using the host port displayed for the Airflow service.
 
 ### 4. Verify the PostgreSQL connection
 
-Before triggering the DAG, confirm that Airflow contains a database connection with the connection ID `postgres`.
+Before triggering the DAG, confirm that Airflow contains a PostgreSQL connection with the connection ID:
+
+```text
+postgres
+```
 
 ### 5. Run the pipeline
 
-Enable and trigger the `fake_store_pipeline` DAG from the Airflow interface. Task progress and execution logs can be monitored directly from the DAG view.
+Enable and trigger the `fake_store_pipeline` DAG from the Airflow interface.
+
+Task progress, retries, execution status, and operational logs can be monitored directly from the DAG view.
 
 ### 6. Stop the services
 
@@ -97,18 +112,39 @@ Enable and trigger the `fake_store_pipeline` DAG from the Airflow interface. Tas
 docker compose down
 ```
 
+## V1 Scope
+
+The current V1 includes:
+
+* End-to-end Airflow orchestration
+* API availability checks
+* Products, users, and carts extraction
+* Nested JSON transformation
+* Basic duplicate and null filtering
+* PostgreSQL staging loads
+* Product, user, and date dimensions
+* Fact-table loading
+* HTTP request timeouts
+* Airflow task retries
+* Task-level execution timeouts
+* Basic operational logging
+* Docker-based local execution
+* Full-refresh loading
+
+Advanced reliability, data-quality, and incremental-loading features are planned for V2.
+
 ## Next Steps
 
 * Define the fact-table grain explicitly and retain `cart_id` as a degenerate dimension
-* Add source-to-fact row-count reconciliation
-* Detect and log rows lost because of missing dimension matches
-* Add foreign-key integrity checks between the fact and dimension tables
 * Execute `TRUNCATE + INSERT` operations inside a single transaction with rollback support
-* Add structured logs for extracted, accepted, rejected and duplicate row counts
+* Add source-to-fact row-count reconciliation
+* Detect and log records lost because of missing dimension matches
+* Add foreign-key integrity checks between fact and dimension tables
+* Expand structured logging to include extracted, accepted, rejected, and duplicate row counts
+* Add audit and rejected-record tables
 * Migrate watermark-based incremental loading into the Airflow DAG
 * Add unit tests for transformation functions
 * Add integration tests for warehouse loading
-* Add audit and rejected-record tables
 * Add Airflow failure notifications and alerting
 
 ## Tech Stack
@@ -118,6 +154,7 @@ docker compose down
 * PostgreSQL
 * SQL
 * requests
-* Docker and Docker Compose
-* pandas and Jupyter Notebook (original local implementation)
+* Docker
+* Docker Compose
+* pandas and Jupyter Notebook for the original local implementation
 * Git and GitHub
