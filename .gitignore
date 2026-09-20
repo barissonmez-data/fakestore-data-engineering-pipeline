@@ -1,0 +1,14 @@
+﻿logs/
+.env
+__pycache__/
+*.pyc
+plugins/
+first_dag.py
+first_dag_practice2.py
+yenidosya.py
+airflow_notlar_syntax.py
+section_2_8_installing_airflow.zip
+fakestore-repo-check/
+dags_backup/
+Dagdeneme.py
+Asset.py
