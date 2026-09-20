@@ -31,11 +31,11 @@ Fake Store API → Airflow API checks → Python transformations → PostgreSQL 
 
 ## Current Loading Strategy
 
-The current Airflow V1 uses a full-refresh loading strategy. Staging, dimension, and fact tables are cleared and rebuilt during each successful DAG run.
+The current Airflow V1 uses a full-refresh loading strategy. During each DAG run, the staging, dimension, and fact tables are cleared and rebuilt.
 
 Because the tables are rebuilt instead of continuously appended, repeated successful runs do not accumulate duplicate fact rows.
 
-The current implementation executes `TRUNCATE` and `INSERT` operations separately. Executing these operations inside a single database transaction with rollback support is planned for V2.
+The current implementation executes `TRUNCATE` and `INSERT` operations separately. If an insert operation fails after a table has been cleared, the previous data is not automatically restored. Executing these operations inside a single database transaction with rollback support is planned for V2.
 
 The original local and Jupyter implementation included a `water_mark` table and incremental loading based on:
 
@@ -57,11 +57,19 @@ The `water_mark` table visible in the diagram belongs to the original local incr
 
 The screenshot below shows a successful end-to-end V1 DAG run.
 
-Airflow completed the API checks, table creation, extraction, transformation, staging loads, dimension loads, and fact-table loading. The successful run also verified the configured retry behavior, request timeouts, task-level execution timeouts, and operational logging.
+Airflow completed the API checks, table creation, extraction, transformation, staging loads, dimension loads, and fact-table loading.
+
+The DAG is configured with Airflow retries, HTTP request timeouts, task-level execution timeouts, and operational logging. The screenshot confirms successful normal-path execution; failure-specific retry and timeout behavior was not separately tested during this run.
 
 In the validated run, the final `fill_facts` task successfully loaded 14 rows into PostgreSQL.
 
 ![Successful Airflow DAG run](docs/images/airflow-dag-success.png)
+
+## Configuration and Security
+
+Local Airflow configuration, logs, environment files, and generated secrets are excluded from version control.
+
+The required PostgreSQL connection must be configured locally in Airflow before triggering the DAG. Credentials and generated secrets should never be committed to the repository.
 
 ## How to Run
 
@@ -94,7 +102,7 @@ Open the Airflow web interface using the host port displayed for the Airflow ser
 
 ### 4. Verify the PostgreSQL connection
 
-Before triggering the DAG, confirm that Airflow contains a PostgreSQL connection with the connection ID:
+Before triggering the DAG, confirm that Airflow contains a PostgreSQL connection with the following connection ID:
 
 ```text
 postgres
@@ -114,7 +122,7 @@ docker compose down
 
 ## V1 Scope
 
-The current V1 includes:
+The completed V1 includes:
 
 * End-to-end Airflow orchestration
 * API availability checks
@@ -131,7 +139,7 @@ The current V1 includes:
 * Docker-based local execution
 * Full-refresh loading
 
-Advanced reliability, data-quality, and incremental-loading features are planned for V2.
+Advanced reliability, data-quality, testing, and incremental-loading features are planned for V2.
 
 ## Next Steps
 
@@ -145,6 +153,7 @@ Advanced reliability, data-quality, and incremental-loading features are planned
 * Migrate watermark-based incremental loading into the Airflow DAG
 * Add unit tests for transformation functions
 * Add integration tests for warehouse loading
+* Add continuous integration checks
 * Add Airflow failure notifications and alerting
 
 ## Tech Stack
