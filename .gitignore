@@ -12,3 +12,5 @@ fakestore-repo-check/
 dags_backup/
 Dagdeneme.py
 Asset.py
+
+config/
