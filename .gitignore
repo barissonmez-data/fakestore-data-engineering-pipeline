@@ -14,3 +14,5 @@ Dagdeneme.py
 Asset.py
 
 config/
+
+config/airflow.cfg
