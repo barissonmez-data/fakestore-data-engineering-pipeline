@@ -28,6 +28,7 @@ Fake Store API → Airflow API checks → Python transformations → PostgreSQL 
 * Created surrogate keys for warehouse dimensions
 * Joined staging data with dimension tables
 * Loaded quantity, price, and dimension keys into the `facts_a` table
+* Containerized the pipeline with Docker Compose: an Airflow service and a separate PostgreSQL warehouse service
 
 ## Current Loading Strategy
 
@@ -67,16 +68,15 @@ In the validated run, the final `fill_facts` task successfully loaded 14 rows in
 
 ## Configuration and Security
 
-Local Airflow configuration, logs, environment files, and generated secrets are excluded from version control.
+Credentials are read from a local `.env` file, which is excluded from version control. The `.env.example` file lists the required variables.
 
-The required PostgreSQL connection must be configured locally in Airflow before triggering the DAG. Credentials and generated secrets should never be committed to the repository.
+The Airflow PostgreSQL connection (`postgres`) is defined in `compose.yml` through the `AIRFLOW_CONN_POSTGRES` environment variable, so no manual connection setup is needed in the Airflow UI.
 
 ## How to Run
 
 ### Prerequisites
 
-* Docker
-* Docker Compose
+* Docker Desktop (includes Docker Compose)
 * Git
 
 ### 1. Clone the repository
@@ -86,39 +86,87 @@ git clone https://github.com/barissonmez-data/fakestore-data-engineering-pipelin
 cd fakestore-data-engineering-pipeline
 ```
 
-### 2. Start the services
+### 2. Create the environment file
+
+```bash
+cp .env.example .env            # macOS / Linux
+Copy-Item .env.example .env     # Windows PowerShell
+```
+
+Fill in your own values:
+
+| Variable      | Description                                 |
+|---------------|---------------------------------------------|
+| `DB_USER`     | PostgreSQL user for the FakeStore warehouse |
+| `DB_PASSWORD` | Password for that user                      |
+| `DB_NAME`     | Database name                               |
+
+### 3. Start the services
 
 ```bash
 docker compose up --build -d
 ```
 
-### 3. Check the running services and ports
+This starts two containers:
+
+* **airflow**: Airflow in standalone mode, with DAGs mounted from `./dags`
+* **fakestore_db**: PostgreSQL 16, storing staging, dimension and fact tables in a named volume
+
+### 4. Check the running services
 
 ```bash
 docker compose ps
 ```
 
-Open the Airflow web interface using the host port displayed for the Airflow service.
+Both services should be listed as running.
 
-### 4. Verify the PostgreSQL connection
+### 5. Get the Airflow admin password
 
-Before triggering the DAG, confirm that Airflow contains a PostgreSQL connection with the following connection ID:
-
-```text
-postgres
+```bash
+docker compose logs airflow | grep Password       # macOS / Linux
+docker compose logs airflow | findstr Password    # Windows
 ```
 
-### 5. Run the pipeline
+A new password is generated whenever the Airflow container is recreated.
 
-Enable and trigger the `fake_store_pipeline` DAG from the Airflow interface.
+### 6. Open Airflow
+
+Go to http://localhost:8082 and log in with user `admin` and the password from step 5.
+
+### 7. Run the pipeline
+
+Enable and trigger the `fake_store_pipeline` DAG from the Airflow interface. All tasks should finish successfully.
 
 Task progress, retries, execution status, and operational logs can be monitored directly from the DAG view.
 
-### 6. Stop the services
+Optional: verify the warehouse tables:
 
 ```bash
-docker compose down
+docker compose exec fakestore_db psql -U <DB_USER> -d <DB_NAME> -c "\dt fakestore_warehouse.*"
 ```
+
+### 8. Stop the services
+
+* `docker compose stop`: stops the containers and keeps them
+* `docker compose down`: removes the containers; database data in the volume is kept
+
+## Design Decisions
+
+* **Two services, two sources.** Airflow is built from a custom `Dockerfile` because the DAG needs extra packages (`requests`, PostgreSQL provider). PostgreSQL uses the official `postgres:16` image and is configured only through environment variables.
+* **Separate warehouse database.** FakeStore staging, dimension and fact tables live in `fakestore_db`, not in Airflow's own metadata database.
+* **DAGs via bind mount.** `./dags` is mounted into the Airflow container, so DAG changes are picked up immediately without rebuilding the image. A rebuild (`docker compose up -d --build`) is only needed when `Dockerfile` or `requirements.txt` changes.
+* **PostgreSQL data in a named volume.** Tables survive `docker compose down` because they are stored in a volume, not inside the container.
+* **Connection as code.** The Airflow connection is defined with `AIRFLOW_CONN_POSTGRES` in `compose.yml` instead of the UI, so it survives container recreation and needs no manual setup.
+* **Container networking.** Airflow reaches PostgreSQL by its service name on the Compose network (`fakestore_db:5432`). PostgreSQL is not exposed to the host; only the Airflow UI is published (`8082:8080`).
+* **Pinned image versions.** Images use explicit tags (e.g. `postgres:16`) so the stack does not change when a new version is released.
+* **Secrets outside the repository.** Credentials are read from `.env` (git-ignored); `.env.example` documents the required variables.
+
+### Known Limitations
+
+* Airflow runs in `standalone` mode, which is intended for local development.
+* The Airflow admin password is regenerated whenever the container is recreated.
+* Airflow's own metadata (run history) is not persisted across `docker compose down`.
+* The Airflow service does not yet wait for PostgreSQL to be ready (no healthcheck).
 
 ## V1 Scope
 
@@ -143,6 +191,7 @@ Advanced reliability, data-quality, testing, and incremental-loading features ar
 
 ## Next Steps
 
+* Add a PostgreSQL healthcheck so Airflow starts only after the database is ready
 * Define the fact-table grain explicitly and retain `cart_id` as a degenerate dimension
 * Execute `TRUNCATE + INSERT` operations inside a single transaction with rollback support
 * Add source-to-fact row-count reconciliation
