@@ -1,6 +1,7 @@
 ﻿logs/
 .env
 __pycache__/
+.ipynb_checkpoints/
 *.pyc
 plugins/
 first_dag.py
