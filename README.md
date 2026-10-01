@@ -118,7 +118,7 @@ This starts two containers:
 docker compose ps
 ```
 
-Both services should be listed as running.
+`fakestore_db` should show `(healthy)`. Airflow starts only after PostgreSQL is healthy, so on the first startup it may take about 20–30 seconds before the Airflow UI is available.
 
 ### 5. Get the Airflow admin password
 
@@ -160,13 +160,13 @@ docker compose exec fakestore_db psql -U <DB_USER> -d <DB_NAME> -c "\dt fakestor
 * **Container networking.** Airflow reaches PostgreSQL by its service name on the Compose network (`fakestore_db:5432`). PostgreSQL is not exposed to the host; only the Airflow UI is published (`8082:8080`).
 * **Pinned image versions.** Images use explicit tags (e.g. `postgres:16`) so the stack does not change when a new version is released.
 * **Secrets outside the repository.** Credentials are read from `.env` (git-ignored); `.env.example` documents the required variables.
+* **Healthcheck-based startup order.** PostgreSQL has a `pg_isready` healthcheck, and Airflow uses `depends_on` with `condition: service_healthy`. Airflow therefore starts only after the database accepts connections, not just after its container is running.
 
 ### Known Limitations
 
 * Airflow runs in `standalone` mode, which is intended for local development.
 * The Airflow admin password is regenerated whenever the container is recreated.
 * Airflow's own metadata (run history) is not persisted across `docker compose down`.
-* The Airflow service does not yet wait for PostgreSQL to be ready (no healthcheck).
 
 ## V1 Scope
 
@@ -185,13 +185,13 @@ The completed V1 includes:
 * Task-level execution timeouts
 * Basic operational logging
 * Docker-based local execution
+* PostgreSQL healthcheck with ordered service startup
 * Full-refresh loading
 
 Advanced reliability, data-quality, testing, and incremental-loading features are planned for V2.
 
 ## Next Steps
 
-* Add a PostgreSQL healthcheck so Airflow starts only after the database is ready
 * Define the fact-table grain explicitly and retain `cart_id` as a degenerate dimension
 * Execute `TRUNCATE + INSERT` operations inside a single transaction with rollback support
 * Add source-to-fact row-count reconciliation

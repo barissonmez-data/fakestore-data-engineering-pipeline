@@ -1,0 +1,30 @@
+services:
+    airflow:
+        build: .
+        volumes:
+           - ./dags:/opt/airflow/dags
+        command: standalone
+        ports:
+           - '8082:8080'
+        environment:
+          AIRFLOW_CONN_POSTGRES: postgresql://${DB_USER}:${DB_PASSWORD}@fakestore_db:5432/${DB_NAME}
+        depends_on:
+         fakestore_db:
+           condition: service_healthy
+
+        
+    fakestore_db:
+        image: postgres:16
+        environment:
+          POSTGRES_USER : ${DB_USER}
+          POSTGRES_DB : ${DB_NAME}
+          POSTGRES_PASSWORD : ${DB_PASSWORD}
+        volumes:
+          - my_volume:/var/lib/postgresql/data
+        healthcheck:
+            test: ['CMD-SHELL' ,'pg_isready -U ${DB_USER} -d ${DB_NAME}']
+            interval: 20s
+            timeout : 10s
+            retries : 4
+volumes:
+   my_volume:
