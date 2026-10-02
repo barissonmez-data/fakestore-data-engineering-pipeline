@@ -26,5 +26,7 @@ services:
             interval: 20s
             timeout : 10s
             retries : 4
+        ports:
+         - '5433:5432'
 volumes:
    my_volume:
