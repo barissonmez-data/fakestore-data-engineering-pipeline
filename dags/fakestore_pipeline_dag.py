@@ -199,12 +199,18 @@ def fake_store_pipeline():
                     gorulen.append(product['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE stg_products')
-        hook.insert_rows(
-            table='stg_products',
-            rows=yeni,
-            target_fields=['id', 'title', 'price', 'category', 'rate', 'count', 'image', 'description']
-        )
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE stg_products')
+            cur.executemany('INSERT INTO stg_products (id, title, price, category, rate, count, image, description) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', yeni)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+          
         logging.info(
             f'{len(yeni)} cleaned product records loaded into stg_products'
         )
