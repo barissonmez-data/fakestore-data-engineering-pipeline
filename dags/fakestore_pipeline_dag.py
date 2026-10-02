@@ -210,7 +210,7 @@ def fake_store_pipeline():
             raise
         finally:
             conn.close()
-          
+
         logging.info(
             f'{len(yeni)} cleaned product records loaded into stg_products'
         )
@@ -260,15 +260,14 @@ def fake_store_pipeline():
         try:
             cur = conn.cursor()
             cur.execute('TRUNCATE TABLE stg_user')
-            cur.executemany('INSERT INTO stg_user (id ,email,username,phone,firstname,lastname,city,street,number,zip) VALUES(%s ,%s,%s,%s,%s,%s,%s,%s,%s,%s)',list_yeni)
+            cur.executemany('INSERT INTO stg_user (id, email, username, phone, firstname, lastname, city, street, number, zip) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', list_yeni)
             conn.commit()
-
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
-        
+
         logging.info(f'{len(list_yeni)} cleaned user records loaded into stg_user')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
@@ -294,42 +293,64 @@ def fake_store_pipeline():
                         gorulen.append(anahtar)
 
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE stg_carts')
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE stg_carts')
+            cur.executemany('INSERT INTO stg_carts (id, date, userId, quantity, productId) VALUES (%s, %s, %s, %s, %s)', yeni_list)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
-        hook.insert_rows(
-            table='stg_carts',
-            rows=yeni_list,
-            target_fields=['id', 'date', 'userId', 'quantity', 'productId']
-        )
         logging.info(f'{len(yeni_list)} cleaned cart line records loaded into stg_carts')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=40))
     def fill_product_dim():
         logging.info('Starting product_dim load')
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE fakestore_warehouse.product_dim')
-        hook.run('''
-               INSERT INTO fakestore_warehouse.product_dim
-              (productid, title, description, category, rate, count)
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE fakestore_warehouse.product_dim')
+            cur.execute('''
+                INSERT INTO fakestore_warehouse.product_dim
+                (productid, title, description, category, rate, count)
+                SELECT id, title, description, category, rate, count
+                FROM stg_products
+            ''')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
-               SELECT id, title, description, category, rate, count
-
-               FROM stg_products
-
-        ''')
         logging.info('product_dim load completed successfully')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=40))
     def fill_user_dim():
         logging.info('Starting user_dim load')
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE fakestore_warehouse.user_dim')
-        hook.run('''
-        INSERT INTO fakestore_warehouse.user_dim
-        (userid, username, firstname, lastname, phone, street, zipcode, number, email, city)
-        SELECT id, username, firstname, lastname, phone, street, zip, number, email, city
-        FROM stg_user
-    ''')
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE fakestore_warehouse.user_dim')
+            cur.execute('''
+                INSERT INTO fakestore_warehouse.user_dim
+                (userid, username, firstname, lastname, phone, street, zipcode, number, email, city)
+                SELECT id, username, firstname, lastname, phone, street, zip, number, email, city
+                FROM stg_user
+            ''')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
         logging.info('user_dim load completed successfully')
 
 
@@ -337,29 +358,49 @@ def fake_store_pipeline():
     def fill_facts():
         logging.info('Starting facts_a load')
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE fakestore_warehouse.facts_a')
-        hook.run('''
-        INSERT INTO fakestore_warehouse.facts_a
-        (quantity, price, product_key, user_key, date_id)
-        SELECT quantity, price, product_key, user_key, date_id
-        FROM stg_carts
-        JOIN fakestore_warehouse.product_dim ON stg_carts.productId = product_dim.productid
-        JOIN stg_products ON stg_carts.productId = stg_products.id
-        JOIN fakestore_warehouse.user_dim ON stg_carts.userId = user_dim.userid
-        JOIN fakestore_warehouse.date_dim ON stg_carts.date = date_dim.date
-    ''')
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE fakestore_warehouse.facts_a')
+            cur.execute('''
+                INSERT INTO fakestore_warehouse.facts_a
+                (quantity, price, product_key, user_key, date_id)
+                SELECT quantity, price, product_key, user_key, date_id
+                FROM stg_carts
+                JOIN fakestore_warehouse.product_dim ON stg_carts.productId = product_dim.productid
+                JOIN stg_products ON stg_carts.productId = stg_products.id
+                JOIN fakestore_warehouse.user_dim ON stg_carts.userId = user_dim.userid
+                JOIN fakestore_warehouse.date_dim ON stg_carts.date = date_dim.date
+            ''')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
         logging.info('facts_a load completed successfully')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=40))
     def fill_date_dim():
         logging.info('Starting date_dim load')
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE fakestore_warehouse.date_dim')
-        hook.run('''
-        INSERT INTO fakestore_warehouse.date_dim
-        (date)
-        SELECT DISTINCT date FROM stg_carts
-    ''')
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE fakestore_warehouse.date_dim')
+            cur.execute('''
+                INSERT INTO fakestore_warehouse.date_dim
+                (date)
+                SELECT DISTINCT date FROM stg_carts
+            ''')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
         logging.info('date_dim load completed successfully')
 
     user_data = users_check()
