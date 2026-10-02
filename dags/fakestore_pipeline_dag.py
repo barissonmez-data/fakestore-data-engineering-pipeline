@@ -256,12 +256,19 @@ def fake_store_pipeline():
                     gorulen.append(user['id'])
 
         hook = PostgresHook(postgres_conn_id='postgres')
-        hook.run('TRUNCATE TABLE stg_user')
-        hook.insert_rows(
-            table='stg_user',
-            rows=list_yeni,
-            target_fields=['id', 'email', 'username', 'phone', 'firstname', 'lastname', 'city', 'street', 'number', 'zip']
-        )
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('TRUNCATE TABLE stg_user')
+            cur.executemany('INSERT INTO stg_user (id ,email,username,phone,firstname,lastname,city,street,number,zip) VALUES(%s ,%s,%s,%s,%s,%s,%s,%s,%s,%s)',list_yeni)
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        
         logging.info(f'{len(list_yeni)} cleaned user records loaded into stg_user')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
