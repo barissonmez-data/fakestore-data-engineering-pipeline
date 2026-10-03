@@ -200,6 +200,13 @@ def fake_store_pipeline():
         accepted_products = len(yeni)
         rejected_products = extracted_products - accepted_products
 
+        logging.info(
+            f'Product reconciliation | '
+            f'extracted={extracted_products} | '
+            f'accepted={accepted_products} | '
+            f'rejected={rejected_products}'
+        )
+
 
 
         hook = PostgresHook(postgres_conn_id='postgres')
@@ -262,6 +269,13 @@ def fake_store_pipeline():
 
         accepted_user = len(list_yeni)
         rejected_user = extracted_count - accepted_user
+
+        logging.info(
+            f'User reconciliation | '
+            f'extracted={extracted_count} | '
+            f'accepted={accepted_user} | '
+            f'rejected={rejected_user}'
+        )
 
 
         hook = PostgresHook(postgres_conn_id='postgres')
