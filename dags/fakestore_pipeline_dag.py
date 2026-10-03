@@ -174,7 +174,7 @@ def fake_store_pipeline():
         yeni = []
         gorulen = []
         logging.info(f'{len(fake_product)} product records, starting transformation and validation')
-
+        extracted_products = len(fake_product)
         for product in fake_product:
             rating = product['rating']
             rate = rating['rate']
@@ -197,6 +197,10 @@ def fake_store_pipeline():
                 if None not in tuple_hali:
                     yeni.append(tuple_hali)
                     gorulen.append(product['id'])
+        accepted_products = len(yeni)
+        rejected_products = extracted_products - accepted_products
+
+
 
         hook = PostgresHook(postgres_conn_id='postgres')
         conn = hook.get_conn()
@@ -220,7 +224,8 @@ def fake_store_pipeline():
         list_yeni = []
         gorulen = []
         logging.info(f'{len(fake_user)} user records, starting transformation and validation')
-
+        extracted_count = len(fake_user)
+    
         for user in fake_user:
             name = user['name']
             firstname = name['firstname']
@@ -255,6 +260,10 @@ def fake_store_pipeline():
                     list_yeni.append(tuple_hali)
                     gorulen.append(user['id'])
 
+        accepted_user = len(list_yeni)
+        rejected_user = extracted_count - accepted_user
+
+
         hook = PostgresHook(postgres_conn_id='postgres')
         conn = hook.get_conn()
         try:
@@ -270,13 +279,20 @@ def fake_store_pipeline():
 
         logging.info(f'{len(list_yeni)} cleaned user records loaded into stg_user')
 
-    @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
+    @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(seconds=60))
     def process_carts(fake_carts):
         yeni_list = []
         gorulen = []
-        logging.info(f'{len(fake_carts)} cart records, starting transformation and validation')
+
+        logging.info(
+            f'{len(fake_carts)} cart records, starting transformation and validation'
+        )
+
+        extracted_carts = 0
 
         for cart in fake_carts:
+            extracted_carts += len(cart['products'])
+
             for product in cart['products']:
                 anahtar = (cart['id'], product['productId'])
 
@@ -288,25 +304,57 @@ def fake_store_pipeline():
                         product['quantity'],
                         product['productId']
                     )
+
                     if None not in tuple_hali:
                         yeni_list.append(tuple_hali)
                         gorulen.append(anahtar)
 
+        accepted_carts = len(yeni_list)
+        rejected_carts = extracted_carts - accepted_carts
+
+        logging.info(
+            f'Cart reconciliation | '
+            f'extracted={extracted_carts} | '
+            f'accepted={accepted_carts} | '
+            f'rejected={rejected_carts}'
+        )
+
         hook = PostgresHook(postgres_conn_id='postgres')
         conn = hook.get_conn()
+
         try:
             cur = conn.cursor()
+
             cur.execute('TRUNCATE TABLE stg_carts')
-            cur.executemany('INSERT INTO stg_carts (id, date, userId, quantity, productId) VALUES (%s, %s, %s, %s, %s)', yeni_list)
+
+            cur.executemany(
+                '''
+                INSERT INTO stg_carts
+                (id, date, userId, quantity, productId)
+                VALUES (%s, %s, %s, %s, %s)
+                ''',
+                yeni_list
+            )
+
             conn.commit()
+
         except Exception:
             conn.rollback()
             raise
+
         finally:
             conn.close()
 
-        logging.info(f'{len(yeni_list)} cleaned cart line records loaded into stg_carts')
+        logging.info(
+            f'{len(yeni_list)} cleaned cart line records loaded into stg_carts'
+        )
 
+
+
+
+
+
+    
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=40))
     def fill_product_dim():
         logging.info('Starting product_dim load')
