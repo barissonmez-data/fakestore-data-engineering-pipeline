@@ -2,8 +2,9 @@ from airflow.sdk import dag, task, PokeReturnValue
 import requests
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-from datetime import timedelta
+from datetime import timedelta, datetime
 import logging
+from psycopg2.extras import Json
 
 @dag
 def fake_store_pipeline():
@@ -46,6 +47,17 @@ def fake_store_pipeline():
         street text,
         number int,
         zip text
+        )''')
+
+    create_reject_table = SQLExecuteQueryOperator(retries=2,retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=20),
+        task_id='create_reject_table',
+        conn_id='postgres',
+        sql='''CREATE TABLE IF NOT EXISTS reject_table(
+        record_id numeric,
+        raw_data jsonb,
+        reason text,
+        rejected_at timestamp,
+        source text
         )''')
 
     # --- Şema: 3 dim create'inden önce çalışması gereken tek task ---
@@ -114,46 +126,62 @@ def fake_store_pipeline():
     def users_check() -> PokeReturnValue:
         import requests
         logging.info('Checking users API status code')
-        response = requests.get('https://fakestoreapi.com/users',timeout=10)
-        if response.status_code == 200:
-            condition = True
-            user = response.json()
-            logging.info('Users API status code is valid')
-        else:
+        try:
+            response = requests.get('https://fakestoreapi.com/users', timeout=10)
+            if response.status_code == 200:
+                condition = True
+                user = response.json()
+                logging.info('Users API status code is valid')
+            else:
+                condition = False
+                user = None
+                logging.warning('Users API status code is not valid')
+        except requests.exceptions.RequestException:
             condition = False
             user = None
-            logging.warning('Users API status code is not valid')
+            logging.warning('Users API did not respond, will poke again')
+
         return PokeReturnValue(is_done=condition, xcom_value=user)
 
     @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
     def product_check() -> PokeReturnValue:
         import requests
         logging.info('Checking products API status code')
-        response = requests.get('https://fakestoreapi.com/products',timeout=10)
-        if response.status_code == 200:
-            condition = True
-            user = response.json()
-            logging.info('Products API status code is valid')
-        else:
+        try:
+            response = requests.get('https://fakestoreapi.com/products', timeout=10)
+            if response.status_code == 200:
+                condition = True
+                user = response.json()
+                logging.info('Products API status code is valid')
+            else:
+                condition = False
+                user = None
+                logging.warning('Products API status code is not valid')
+        except requests.exceptions.RequestException:
             condition = False
             user = None
-            logging.warning('Products API status code is not valid')
+            logging.warning('Products API did not respond, will poke again')
 
         return PokeReturnValue(is_done=condition, xcom_value=user)
 
     @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
     def carts_check() -> PokeReturnValue:
-        logging.info('Checking carts API status code')
         import requests
-        response = requests.get('https://fakestoreapi.com/carts',timeout=10)
-        if response.status_code == 200:
-            condition = True
-            user = response.json()
-            logging.info('Carts API status code is valid')
-        else:
+        logging.info('Checking carts API status code')
+        try:
+            response = requests.get('https://fakestoreapi.com/carts', timeout=10)
+            if response.status_code == 200:
+                condition = True
+                user = response.json()
+                logging.info('Carts API status code is valid')
+            else:
+                condition = False
+                user = None
+                logging.warning('Carts API status code is not valid')
+        except requests.exceptions.RequestException:
             condition = False
             user = None
-            logging.warning('Carts API status code is not valid')
+            logging.warning('Carts API did not respond, will poke again')
 
         return PokeReturnValue(is_done=condition, xcom_value=user)
 
@@ -172,6 +200,7 @@ def fake_store_pipeline():
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
     def process_products(fake_product):
         yeni = []
+        reddedilen = []
         gorulen = []
         logging.info(f'{len(fake_product)} product records, starting transformation and validation')
         extracted_products = len(fake_product)
@@ -197,6 +226,10 @@ def fake_store_pipeline():
                 if None not in tuple_hali:
                     yeni.append(tuple_hali)
                     gorulen.append(product['id'])
+                else:
+                    reddedilen.append((product['id'], Json(product), 'null', datetime.now(), 'products'))
+            else:
+               reddedilen.append((product['id'],Json(product),'duplicate',datetime.now(),'products'))
         accepted_products = len(yeni)
         rejected_products = extracted_products - accepted_products
 
@@ -215,6 +248,15 @@ def fake_store_pipeline():
             cur = conn.cursor()
             cur.execute('TRUNCATE TABLE stg_products')
             cur.executemany('INSERT INTO stg_products (id, title, price, category, rate, count, image, description) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', yeni)
+            cur.execute('SELECT COUNT(*) FROM stg_products')
+            loaded_products = cur.fetchone()[0]
+            if loaded_products != accepted_products:
+                raise ValueError(
+                    f'stg_products count mismatch | '
+                    f'accepted={accepted_products} | loaded={loaded_products}'
+                )
+            cur.execute("DELETE FROM reject_table WHERE source='products'")
+            cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -223,12 +265,13 @@ def fake_store_pipeline():
             conn.close()
 
         logging.info(
-            f'{len(yeni)} cleaned product records loaded into stg_products'
+            f'{loaded_products} cleaned product records loaded into stg_products'
         )
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
     def process_users(fake_user):
         list_yeni = []
+        reddedilen = []  
         gorulen = []
         logging.info(f'{len(fake_user)} user records, starting transformation and validation')
         extracted_count = len(fake_user)
@@ -266,6 +309,10 @@ def fake_store_pipeline():
                 if None not in tuple_hali:
                     list_yeni.append(tuple_hali)
                     gorulen.append(user['id'])
+                else:  # YENİ
+                    reddedilen.append((user['id'], Json(user), 'null', datetime.now(), 'users'))
+            else:  # YENİ
+                reddedilen.append((user['id'], Json(user), 'duplicate', datetime.now(), 'users'))
 
         accepted_user = len(list_yeni)
         rejected_user = extracted_count - accepted_user
@@ -284,6 +331,15 @@ def fake_store_pipeline():
             cur = conn.cursor()
             cur.execute('TRUNCATE TABLE stg_user')
             cur.executemany('INSERT INTO stg_user (id, email, username, phone, firstname, lastname, city, street, number, zip) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', list_yeni)
+            cur.execute('SELECT COUNT(*) FROM stg_user')
+            loaded_user = cur.fetchone()[0]
+            if loaded_user != accepted_user:
+                raise ValueError(
+                    f'stg_user count mismatch | '
+                    f'accepted={accepted_user} | loaded={loaded_user}'
+                )
+            cur.execute("DELETE FROM reject_table WHERE source='users'")  # YENİ
+            cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)  # YENİ
             conn.commit()
         except Exception:
             conn.rollback()
@@ -291,46 +347,53 @@ def fake_store_pipeline():
         finally:
             conn.close()
 
-        logging.info(f'{len(list_yeni)} cleaned user records loaded into stg_user')
+        logging.info(f'{loaded_user} cleaned user records loaded into stg_user')
 
     @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(seconds=60))
     def process_carts(fake_carts):
         yeni_list = []
         gorulen = []
+        reddedilen = []
 
         logging.info(
             f'{len(fake_carts)} cart records, starting transformation and validation'
         )
 
-        extracted_carts = 0
+        extracted_cart_lines = 0
 
         for cart in fake_carts:
-            extracted_carts += len(cart['products'])
+            extracted_cart_lines += len(cart['products'])
 
-            for product in cart['products']:
-                anahtar = (cart['id'], product['productId'])
+            for cart_line in cart['products']:
+                anahtar = (cart['id'], cart_line['productId'])
 
                 if anahtar not in gorulen:
                     tuple_hali = (
                         cart['id'],
                         cart['date'],
                         cart['userId'],
-                        product['quantity'],
-                        product['productId']
+                        cart_line['quantity'],
+                        cart_line['productId']
                     )
 
                     if None not in tuple_hali:
                         yeni_list.append(tuple_hali)
                         gorulen.append(anahtar)
 
-        accepted_carts = len(yeni_list)
-        rejected_carts = extracted_carts - accepted_carts
+                    else:
+                        reddedilen.append((cart['id'],Json(cart_line),'null',datetime.now(),'carts'))
+                    
+                else:
+                    reddedilen.append((cart['id'],Json(cart_line),'duplicate',datetime.now(),'carts'))
+
+        accepted_cart_lines = len(yeni_list)
+        rejected_cart_lines = extracted_cart_lines - accepted_cart_lines
 
         logging.info(
             f'Cart reconciliation | '
-            f'extracted={extracted_carts} | '
-            f'accepted={accepted_carts} | '
-            f'rejected={rejected_carts}'
+            f'extracted={extracted_cart_lines} | '
+            f'accepted={accepted_cart_lines} | '
+            f'rejected={rejected_cart_lines}'
         )
 
         hook = PostgresHook(postgres_conn_id='postgres')
@@ -350,6 +413,15 @@ def fake_store_pipeline():
                 yeni_list
             )
 
+            cur.execute('SELECT COUNT(*) FROM stg_carts')
+            loaded_cart_lines = cur.fetchone()[0]
+            if loaded_cart_lines != accepted_cart_lines:
+                raise ValueError(
+                    f'stg_carts count mismatch | '
+                    f'accepted={accepted_cart_lines} | loaded={loaded_cart_lines}'
+                )
+            cur.execute("DELETE FROM   reject_table  WHERE SOURCE = 'carts'")
+            cur.executemany('INSERT INTO  reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)
             conn.commit()
 
         except Exception:
@@ -360,15 +432,10 @@ def fake_store_pipeline():
             conn.close()
 
         logging.info(
-            f'{len(yeni_list)} cleaned cart line records loaded into stg_carts'
+            f'{loaded_cart_lines} cleaned cart line records loaded into stg_carts'
         )
 
 
-
-
-
-
-    
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=40))
     def fill_product_dim():
         logging.info('Starting product_dim load')
@@ -434,6 +501,23 @@ def fake_store_pipeline():
                 JOIN fakestore_warehouse.user_dim ON stg_carts.userId = user_dim.userid
                 JOIN fakestore_warehouse.date_dim ON stg_carts.date = date_dim.date
             ''')
+            cur.execute('SELECT COUNT(*) FROM stg_carts')
+            staged_cart_lines = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM fakestore_warehouse.facts_a')
+            loaded_facts = cur.fetchone()[0]
+
+            logging.info(
+                f'Facts reconciliation | '
+                f'stg_carts={staged_cart_lines} | '
+                f'facts_a={loaded_facts} | '
+                f'lost={staged_cart_lines - loaded_facts}'
+            )
+
+            if loaded_facts != staged_cart_lines:
+                raise ValueError(
+                    f'facts_a count mismatch | '
+                    f'stg_carts={staged_cart_lines} | facts_a={loaded_facts}'
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -486,9 +570,17 @@ def fake_store_pipeline():
     date_filled = fill_date_dim()
 
     # staging fill zinciri (extraction -> fill)
-    process_products(extracted_products) >> product_filled
-    process_users(extracted_users) >> user_filled
-    process_carts(extracted_carts) >> date_filled
+    a = process_products(extracted_products)
+    b = process_users(extracted_users)
+    c = process_carts(extracted_carts)
+
+    create_reject_table >> a
+    create_reject_table >> b
+    create_reject_table >> c
+
+    a >> product_filled
+    b >> user_filled
+    c >> date_filled
 
     # şema -> 3 dim create (birbirinden bağımsız, sadece şemayı bekler)
     create_schema >> create_date_dim
