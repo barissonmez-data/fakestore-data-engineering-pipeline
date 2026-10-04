@@ -1,38 +1,37 @@
 # Fake Store Data Engineering Pipeline
 
-An end-to-end batch ETL pipeline that extracts product, user, and cart data from the Fake Store API, transforms nested JSON with Python, and loads it into a PostgreSQL dimensional warehouse.
+An end-to-end batch ETL pipeline that extracts product, user, and cart data from the Fake Store API, validates and transforms the data with Python, and loads it into a PostgreSQL dimensional warehouse.
 
-Apache Airflow orchestrates the workflow, while Docker Compose runs Airflow and PostgreSQL locally as separate services.
+Apache Airflow orchestrates the workflow, while Docker Compose runs Airflow and PostgreSQL as separate local services.
 
 ```text
-Fake Store API → API Checks → Python Transformations → Staging → Dimensions → Fact Table
+Fake Store API → API Checks → Transform & Validate → Staging → Dimensions → Fact Table
 ```
 
 ![Successful Airflow DAG run](docs/images/airflow-dag-success.png)
 
-*Validated end-to-end DAG run with 21 successful tasks, from API checks to the final fact-table load.*
-
 ---
 
-## What the Pipeline Does
+## Main Features
 
 - Extracts products, users, and carts from the Fake Store API
-- Checks API availability before extraction starts
-- Flattens nested user, address, rating, and cart-product data
-- Removes duplicate product and user records by ID
+- Checks API availability before processing
+- Flattens nested JSON structures
+- Removes duplicate products and users by ID
 - Removes duplicate cart lines using `cart_id + product_id`
-- Filters records containing null values before staging
-- Loads cleaned data into PostgreSQL staging tables
+- Rejects records containing null values
+- Stores rejected records in `reject_table`
+- Loads cleaned records into PostgreSQL staging tables
 - Builds product, user, and date dimensions
-- Uses surrogate keys in the dimensional model
-- Loads the final fact table
-- Uses retries, HTTP timeouts, task execution timeouts, and operational logging
-- Runs warehouse loads inside PostgreSQL transactions with rollback support
-- Runs locally through Docker Compose
+- Loads the final fact table using surrogate keys
+- Performs row-count reconciliation during staging and fact loading
+- Uses retries, HTTP timeouts, execution timeouts, and logging
+- Uses PostgreSQL transactions with rollback on failure
+- Runs locally with Docker Compose
 
 ---
 
-## Data Warehouse Schema
+## Data Warehouse
 
 The warehouse follows a dimensional model with product, user, and date dimensions connected to the `facts_a` table.
 
@@ -40,153 +39,110 @@ The warehouse follows a dimensional model with product, user, and date dimension
      alt="PostgreSQL dimensional warehouse schema"
      src="https://github.com/user-attachments/assets/dc9f0f1b-4bec-454c-b4cc-9c30e905d639" />
 
-The `water_mark` table shown in the diagram belongs to the original local incremental-loading implementation. The current Airflow pipeline still uses full-refresh loading.
+Main warehouse tables:
+
+- `product_dim`
+- `user_dim`
+- `date_dim`
+- `facts_a`
+
+Staging tables:
+
+- `stg_products`
+- `stg_user`
+- `stg_carts`
+
+Rejected records are stored in `reject_table`.
+
+The current Airflow implementation uses a **full-refresh strategy**. The `water_mark` table shown in the original schema belongs to an earlier local incremental-loading implementation.
 
 ---
 
-## Loading Strategy
+## Reliability and Data Quality
 
-The current Airflow pipeline uses a **full-refresh strategy**.
+### Transactional Loads
 
-Each DAG run clears and rebuilds the staging, dimension, and fact tables using the latest source data.
-
-Repeated successful runs therefore rebuild the warehouse instead of continuously appending duplicate rows.
-
-### Atomic Loads
-
-`TRUNCATE` and `INSERT` are executed inside the same PostgreSQL transaction.
-
-On success:
+Each staging, dimension, and fact-table load runs inside its own PostgreSQL transaction.
 
 ```text
-TRUNCATE
-→ INSERT
-→ COMMIT
+TRUNCATE → INSERT → VALIDATE → COMMIT
 ```
 
-If the insert fails:
+If an operation fails, the transaction is rolled back and the exception is raised again so Airflow can mark the task as failed.
 
-```text
-TRUNCATE
-→ INSERT fails
-→ ROLLBACK
-```
+This prevents failed refreshes from leaving an individual table partially updated.
 
-This prevents a table from being left empty if `TRUNCATE` succeeds but the following insert fails.
+### Reject Handling
 
-The transaction is committed only when the load finishes successfully. On failure, the transaction is rolled back and the exception is raised again.
+Null and duplicate records are stored in `reject_table` instead of being silently discarded.
 
-This pattern is used for the staging, dimension, and fact-table loads.
+Each rejected record includes:
 
----
+- record ID
+- rejected record data
+- rejection reason
+- timestamp
+- source
 
-## Idempotency Validation
+Reject handling is implemented for products, users, and cart lines.
 
-The pipeline was run multiple times against the same source data.
+### Row-Count Reconciliation
 
-A `UNION ALL` query was used to compare row counts across all seven warehouse tables:
+For staging loads, accepted records are compared with the rows actually loaded into PostgreSQL.
 
-- 3 staging tables
-- 3 dimension tables
-- 1 fact table
+The fact-table load also compares staged cart lines with loaded fact rows.
 
-The row counts remained unchanged after repeated successful DAG runs.
+A mismatch raises an exception and rolls back the current transaction.
 
-This confirms that the current full-refresh implementation does not accumulate duplicate rows between executions.
+### Full-Refresh Idempotency
+
+The pipeline was executed repeatedly against the same source data.
+
+Warehouse row counts remained stable between successful runs, confirming that the current full-refresh implementation does not continuously accumulate duplicate rows.
 
 ---
 
 ## Docker Setup
 
-The project runs with two main Docker Compose services:
+The project runs with two main Docker Compose services.
 
 ### Airflow
 
-Airflow runs the ETL workflow and is built from the project's custom `Dockerfile`.
+Airflow runs the ETL workflow and is built from the project `Dockerfile`.
 
-The local DAG directory is bind-mounted into the container:
+The local `./dags` directory is bind-mounted into the container, allowing DAG changes without rebuilding the Airflow image.
 
-```text
-./dags → /opt/airflow/dags
-```
-
-Because of the bind mount, DAG code changes can be picked up without rebuilding the Airflow image.
-
-A rebuild is mainly required when the `Dockerfile` or `requirements.txt` changes.
+The Airflow UI is available at `http://localhost:8082`.
 
 ### PostgreSQL
 
 The warehouse runs in a separate PostgreSQL 16 container.
 
-PostgreSQL data is stored in a named Docker volume, so the warehouse survives normal container recreation and:
+Data is stored in a named Docker volume and survives normal container recreation.
 
-```bash
-docker compose down
-```
+Airflow connects to PostgreSQL internally through `fakestore_db:5432`.
 
-Airflow connects to PostgreSQL through the Docker Compose network using:
-
-```text
-fakestore_db:5432
-```
-
-PostgreSQL does not need to expose a host port for communication with Airflow.
-
-Only the Airflow UI is published to the host:
-
-```text
-8082:8080
-```
-
----
-
-## PostgreSQL Health Check
-
-PostgreSQL uses `pg_isready` to check whether the database is ready to accept connections.
-
-Airflow depends on PostgreSQL with:
-
-```yaml
-depends_on:
-  fakestore_db:
-    condition: service_healthy
-```
-
-During Docker Compose startup, Airflow waits until PostgreSQL reports a healthy status before starting.
-
-This avoids Airflow attempting to connect while PostgreSQL is still initializing.
+A `pg_isready` health check ensures PostgreSQL is ready before Airflow starts.
 
 ---
 
 ## Configuration
 
-Database credentials are stored in a local `.env` file, which is excluded from Git.
+Database credentials are stored in a local `.env` file excluded from Git.
 
-The required variables are documented in `.env.example`:
+Required variables:
 
-```text
-DB_USER
-DB_PASSWORD
-DB_NAME
-```
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_NAME`
 
-The Airflow PostgreSQL connection is configured in `compose.yml` through:
+The variables are documented in `.env.example`.
 
-```text
-AIRFLOW_CONN_POSTGRES
-```
-
-This means the PostgreSQL connection does not need to be created manually through the Airflow UI.
+The Airflow PostgreSQL connection is configured through `AIRFLOW_CONN_POSTGRES` in `compose.yml`, so no manual Airflow UI connection setup is required.
 
 ---
 
-## How to Run
-
-### Prerequisites
-
-- Docker Desktop
-- Docker Compose
-- Git
+## Run Locally
 
 ### 1. Clone the repository
 
@@ -209,14 +165,6 @@ Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-Add your own values for:
-
-```text
-DB_USER
-DB_PASSWORD
-DB_NAME
-```
-
 ### 3. Start the services
 
 ```bash
@@ -229,154 +177,67 @@ Check their status:
 docker compose ps
 ```
 
-`fakestore_db` should report `healthy`.
+### 4. Open Airflow
 
-### 4. Get the Airflow password
+Open `http://localhost:8082` and trigger:
 
-macOS / Linux:
+`fake_store_pipeline`
 
-```bash
-docker compose logs airflow | grep Password
-```
-
-Windows:
-
-```powershell
-docker compose logs airflow | findstr Password
-```
-
-### 5. Open Airflow
-
-Open:
-
-```text
-http://localhost:8082
-```
-
-Log in with:
-
-```text
-username: admin
-```
-
-and the generated Airflow password.
-
-Enable and trigger:
-
-```text
-fake_store_pipeline
-```
-
-### 6. Optional warehouse check
-
-```bash
-docker compose exec fakestore_db psql -U <DB_USER> -d <DB_NAME> -c "\dt fakestore_warehouse.*"
-```
-
-### 7. Stop the services
-
-Stop the containers without removing them:
-
-```bash
-docker compose stop
-```
-
-Or remove the containers:
+### 5. Stop the services
 
 ```bash
 docker compose down
 ```
 
-The PostgreSQL data remains in the named volume.
+PostgreSQL data remains in the named volume.
 
-Be careful with:
-
-```bash
-docker compose down -v
-```
-
-because `-v` also deletes the PostgreSQL volume.
+Avoid `docker compose down -v` unless you intentionally want to remove the database volume.
 
 ---
 
 ## Design Decisions
 
-### Separate Airflow and Warehouse Services
+- **Separate Airflow and PostgreSQL services:** keeps orchestration and warehouse storage separate
+- **Connection as code:** PostgreSQL connection is configured through Docker Compose
+- **Named PostgreSQL volume:** warehouse data survives container recreation
+- **Bind-mounted DAG directory:** DAG changes do not require an image rebuild
+- **Transactional loads:** failed database loads are rolled back
+- **Reject handling:** invalid records remain inspectable
+- **Row-count validation:** potential silent data loss causes the load to fail
 
-Airflow and PostgreSQL run as separate services.
+---
 
-The Fake Store warehouse is kept separate from Airflow's own metadata database.
+## Current V2 Progress
 
-### Connection as Code
+### Completed
 
-The PostgreSQL connection is defined through `AIRFLOW_CONN_POSTGRES` in `compose.yml` instead of being configured manually in the Airflow UI.
+- Transaction-based database loads
+- Rollback on failure
+- Error handling
+- Row-count reconciliation
+- Reject table and reject handling
+- Operational logging
+- Full-refresh idempotency validation
 
-This makes the local environment easier to recreate.
+### Next
 
-### Named Volume for PostgreSQL
-
-Warehouse data is stored outside the PostgreSQL container in a named volume.
-
-This allows the data to survive normal container recreation.
-
-### Bind Mount for DAG Development
-
-The local `./dags` directory is mounted directly into the Airflow container.
-
-DAG changes therefore do not require an image rebuild.
-
-### Health-Based Startup
-
-Airflow waits for PostgreSQL to become ready before starting during Docker Compose startup.
-
-### Atomic Database Loads
-
-`TRUNCATE` and `INSERT` run inside the same transaction.
-
-Successful loads are committed, while failed loads are rolled back.
-
-This prevents failed refreshes from leaving warehouse tables empty.
+1. Audit / pipeline run table
+2. Referential integrity and stronger data-quality checks
+3. Incremental loading
+4. Unit and integration tests
+5. CI
+6. Failure notifications
 
 ---
 
 ## Known Limitations
 
 - Airflow currently runs in `standalone` mode for local development
-- The Airflow version currently uses full-refresh loading only
-- Data-quality checks currently focus on duplicate and null filtering
-- Rejected records are not stored in a dedicated table yet
-- Complete source-to-target row-count reconciliation is not implemented yet
-- Automated unit and integration tests are not implemented yet
-- No CI pipeline yet
-- No failure notification or monitoring system yet
-
----
-
-## Next Steps
-
-1. **Row-count reconciliation**  
-   Track extracted, accepted, loaded, and rejected row counts to detect silent data loss.
-
-2. **Reject table**  
-   Store rejected records together with the rejection reason and pipeline stage.
-
-3. **Audit table**  
-   Store per-run and per-table information such as row counts, status, and timestamps.
-
-4. **Integrity checks**  
-   Detect fact rows with missing or invalid dimension references.
-
-5. **Incremental loading**  
-   Bring the existing watermark-based approach into the Airflow DAG.
-
-6. **Testing**  
-   Add unit tests for transformation logic and integration tests for PostgreSQL loading.
-
-7. **Continuous Integration**  
-   Run automated tests when changes are pushed to the repository.
-
-8. **Failure notifications**  
-   Add Airflow alerts for failed pipeline runs.
+- The Airflow pipeline currently uses full-refresh loading
+- Historical run metrics are not yet stored in an audit table
+- Referential-integrity checks are not yet fully implemented
+- Automated tests and CI are not yet implemented
+- Failure notifications are not yet implemented
 
 ---
 
@@ -389,6 +250,5 @@ This prevents failed refreshes from leaving warehouse tables empty.
 - Docker
 - Docker Compose
 - requests
-- pandas
 - Git
 - GitHub
