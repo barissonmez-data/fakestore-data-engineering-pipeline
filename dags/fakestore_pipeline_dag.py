@@ -4,7 +4,10 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from datetime import timedelta, datetime
 import logging
-from psycopg2.extras import Json
+from psycopg.types.json import Jsonb as Json
+
+# True: mock users + mock products test | False: full API -> staging -> dims -> facts DAG
+TEST_MODE = True
 
 @dag
 def fake_store_pipeline():
@@ -59,6 +62,25 @@ def fake_store_pipeline():
         rejected_at timestamp,
         source text
         )''')
+
+
+    create_audit_table = SQLExecuteQueryOperator(
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        execution_timeout=timedelta(seconds=20),
+        task_id='create_audit_table',
+        conn_id='postgres',
+        sql='''
+        CREATE TABLE IF NOT EXISTS audit_table (
+            run_at TIMESTAMP,
+            source TEXT,
+            extracted INT,
+            accepted INT,
+            rejected INT,
+            status TEXT
+        )
+        '''
+    )
 
     # --- Şema: 3 dim create'inden önce çalışması gereken tek task ---
     create_schema = SQLExecuteQueryOperator(retries=2,retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=20),
@@ -122,7 +144,7 @@ def fake_store_pipeline():
         CONSTRAINT facts_a_pkey PRIMARY KEY (cart_line_key)
      )''')
 
-    @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
+    @task.sensor(poke_interval=20,timeout=120,retries=2, retry_delay=timedelta(minutes=2))
     def users_check() -> PokeReturnValue:
         import requests
         logging.info('Checking users API status code')
@@ -143,7 +165,7 @@ def fake_store_pipeline():
 
         return PokeReturnValue(is_done=condition, xcom_value=user)
 
-    @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
+    @task.sensor(poke_interval=20,timeout=120,retries=2, retry_delay=timedelta(minutes=2))
     def product_check() -> PokeReturnValue:
         import requests
         logging.info('Checking products API status code')
@@ -164,7 +186,7 @@ def fake_store_pipeline():
 
         return PokeReturnValue(is_done=condition, xcom_value=user)
 
-    @task.sensor(retries=2, retry_delay=timedelta(minutes=2))
+    @task.sensor(poke_interval=20,timeout=120,retries=2, retry_delay=timedelta(minutes=2))
     def carts_check() -> PokeReturnValue:
         import requests
         logging.info('Checking carts API status code')
@@ -184,6 +206,54 @@ def fake_store_pipeline():
             logging.warning('Carts API did not respond, will poke again')
 
         return PokeReturnValue(is_done=condition, xcom_value=user)
+
+
+
+    @task
+    def product_check_data():
+        valid_product = { 'rating':{ 'rate':5,'count':3},
+                         'id':2, 'title':'oyuncu', 'price':32,
+                         'category':'game', 'image': 'bmel',
+                         'description':'gos'
+                          }
+
+
+        invalid_product = { 'rating':{ 'rate':2,'count':1},
+                         'id':None, 'title':'oyuncu', 'price':23,
+                         'category':'gt', 'image': 'ops',
+                         'description':'gn'
+                          }
+
+
+        duplicate_product = { 'rating':{ 'rate':5,'count':3},
+                                 'id':2, 'title':'oyuncu', 'price':32,
+                                 'category':'game', 'image': 'bmel',
+                                 'description':'gos'
+                                  }
+
+
+        return [valid_product,invalid_product,duplicate_product]
+
+
+    @task
+    def user_check_data():
+        valid_user = {'id':2, 'email': 'burak@gmail.com',
+                      'username':'anissa', 'phone':'123456789' ,'name':{'firstname':'burak','lastname':'coskun'},
+                     'address':{  'city':'berlin','street':'neukoln',
+                                                        'number':10,  'zipcode':'12043'}
+                                              }
+
+
+        invalid_user = {'id':None, 'email':'burak@gmail.com',
+                        'username':'anissa', 'phone':'123456789','name':{'firstname':'burak','lastname':'coskun'},
+                        'address':{  'city':'berlin','street':'neukoln',
+                                   'number':10,  'zipcode':'12043'}
+                         }
+
+
+
+        return [valid_user,invalid_user]
+
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
     def extract_user(fake_user):
@@ -227,7 +297,27 @@ def fake_store_pipeline():
                     yeni.append(tuple_hali)
                     gorulen.append(product['id'])
                 else:
-                    reddedilen.append((product['id'], Json(product), 'null', datetime.now(), 'products'))
+                    if product['id'] is None:
+                        reason = 'product_id_is_null'
+                    elif product['title'] is None:
+                        reason = 'title_is_null'
+                    elif product['price'] is None:
+                        reason = 'price_is_null'
+                    elif product['category'] is None:
+                        reason = 'category_is_null'
+                    elif product['rate'] is None:
+                        reason = 'rate_is_null'
+                    elif product['count'] is None:
+                        reason = 'count_is_null'
+                    elif product['image'] is None:
+                        reason = 'image_is_null'
+                    elif product['description'] is None:
+                        reason = 'description_is_null'
+
+                    reddedilen.append((
+                        product['id'], Json(product), reason,
+                        datetime.now(), 'products'
+                    ))
             else:
                reddedilen.append((product['id'],Json(product),'duplicate',datetime.now(),'products'))
         accepted_products = len(yeni)
@@ -257,9 +347,16 @@ def fake_store_pipeline():
                 )
             cur.execute("DELETE FROM reject_table WHERE source='products'")
             cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)
+            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+            (datetime.now(), 'products', extracted_products, accepted_products, rejected_products, 'success')
+            )
             conn.commit()
         except Exception:
             conn.rollback()
+            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+            (datetime.now(), 'products', extracted_products, accepted_products, rejected_products, 'failed')
+            )
+            conn.commit()
             raise
         finally:
             conn.close()
@@ -271,11 +368,11 @@ def fake_store_pipeline():
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
     def process_users(fake_user):
         list_yeni = []
-        reddedilen = []  
+        reddedilen = []
         gorulen = []
         logging.info(f'{len(fake_user)} user records, starting transformation and validation')
         extracted_count = len(fake_user)
-    
+
         for user in fake_user:
             name = user['name']
             firstname = name['firstname']
@@ -309,8 +406,32 @@ def fake_store_pipeline():
                 if None not in tuple_hali:
                     list_yeni.append(tuple_hali)
                     gorulen.append(user['id'])
-                else:  # YENİ
-                    reddedilen.append((user['id'], Json(user), 'null', datetime.now(), 'users'))
+                else:
+                    if user['id'] is None:
+                        reason = 'user_id_is_null'
+                    elif user['email'] is None:
+                        reason = 'email_is_null'
+                    elif user['username'] is None:
+                        reason = 'username_is_null'
+                    elif user['phone'] is None:
+                        reason = 'phone_is_null'
+                    elif user['firstname'] is None:
+                        reason = 'firstname_is_null'
+                    elif user['lastname'] is None:
+                        reason = 'lastname_is_null'
+                    elif user['city'] is None:
+                        reason = 'city_is_null'
+                    elif user['street'] is None:
+                        reason = 'street_is_null'
+                    elif user['number'] is None:
+                        reason = 'number_is_null'
+                    elif user['zip'] is None:
+                        reason = 'zip_is_null'
+
+                    reddedilen.append((
+                        user['id'], Json(user), reason,
+                        datetime.now(), 'users'
+                    ))
             else:  # YENİ
                 reddedilen.append((user['id'], Json(user), 'duplicate', datetime.now(), 'users'))
 
@@ -340,9 +461,16 @@ def fake_store_pipeline():
                 )
             cur.execute("DELETE FROM reject_table WHERE source='users'")  # YENİ
             cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)  # YENİ
+            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+            (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'success')
+            )
             conn.commit()
         except Exception:
             conn.rollback()
+            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+            (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'failed')
+            )
+            conn.commit()
             raise
         finally:
             conn.close()
@@ -379,12 +507,21 @@ def fake_store_pipeline():
                     if None not in tuple_hali:
                         yeni_list.append(tuple_hali)
                         gorulen.append(anahtar)
-
                     else:
-                        reddedilen.append((cart['id'],Json(cart_line),'null',datetime.now(),'carts'))
-                    
+                        if cart_line['productId'] is None:
+                            reason = 'product_id_is_null'
+                        elif cart_line['quantity'] is None:
+                            reason = 'quantity_is_null'
+                        elif cart['id'] is None:
+                            reason = 'cart_id_is_null'
+                        elif cart['date'] is None:
+                            reason = 'cart_date_is_null'
+                        elif cart['userId'] is None:
+                            reason = 'user_id_is_null'
+
+                        reddedilen.append((cart['id'], Json(cart_line), reason, datetime.now(), 'carts'))
                 else:
-                    reddedilen.append((cart['id'],Json(cart_line),'duplicate',datetime.now(),'carts'))
+                    reddedilen.append((cart['id'], Json(cart_line), 'duplicate', datetime.now(), 'carts'))
 
         accepted_cart_lines = len(yeni_list)
         rejected_cart_lines = extracted_cart_lines - accepted_cart_lines
@@ -422,10 +559,21 @@ def fake_store_pipeline():
                 )
             cur.execute("DELETE FROM   reject_table  WHERE SOURCE = 'carts'")
             cur.executemany('INSERT INTO  reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)
+            cur.execute(
+                '''INSERT INTO audit_table
+                (run_at, source, extracted, accepted, rejected, status)
+                VALUES (%s, %s, %s, %s, %s, %s)''',
+                (datetime.now(), 'carts', extracted_cart_lines, accepted_cart_lines, rejected_cart_lines, 'success')
+            )
             conn.commit()
 
         except Exception:
             conn.rollback()
+
+            cur.execute('''INSERT INTO audit_table  (run_at,source,extracted,accepted,rejected,status)
+                        VALUES(%s,%s,%s,%s,%s,%s)''',
+                        (datetime.now(), 'carts', extracted_cart_lines,accepted_cart_lines, rejected_cart_lines, 'failed'))
+            conn.commit()
             raise
 
         finally:
@@ -549,53 +697,76 @@ def fake_store_pipeline():
 
         logging.info('date_dim load completed successfully')
 
-    user_data = users_check()
-    extracted_users = extract_user(user_data)
 
-    product_data = product_check()
-    extracted_products = extract_products(product_data)
 
-    carts_data = carts_check()
-    extracted_carts = extract_carts(carts_data)
 
-    # staging create'ler -> ilgili extraction/sensor
-    create_user_table >> user_data
-    create_products_table >> product_data
-    create_table >> carts_data
+    if TEST_MODE:
+        # USERS TEST (mock data, API yok)
+        test_user = user_check_data()
+        b = process_users(test_user)
 
-    # Her fill fonksiyonu TEK KERE çağrılıp değişkene atanıyor.
-    # Aynı fonksiyonu iki kez çağırmak Airflow'da iki AYRI task (__1 ekiyle) oluşturur.
-    product_filled = fill_product_dim()
-    user_filled = fill_user_dim()
-    date_filled = fill_date_dim()
+        create_user_table >> b
+        create_reject_table >> b
+        create_audit_table >> b
 
-    # staging fill zinciri (extraction -> fill)
-    a = process_products(extracted_products)
-    b = process_users(extracted_users)
-    c = process_carts(extracted_carts)
+        # PRODUCTS TEST (mock data, API yok)
+        test_product = product_check_data()
+        processed_products = process_products(test_product)
 
-    create_reject_table >> a
-    create_reject_table >> b
-    create_reject_table >> c
+        create_products_table >> processed_products
+        create_reject_table >> processed_products
+        create_audit_table >> processed_products
 
-    a >> product_filled
-    b >> user_filled
-    c >> date_filled
+    else:
+        # FULL DAG: API -> extract -> staging -> dimensions -> facts
+        users_data = extract_user(users_check())
+        products_data = extract_products(product_check())
+        carts_data = extract_carts(carts_check())
 
-    # şema -> 3 dim create (birbirinden bağımsız, sadece şemayı bekler)
-    create_schema >> create_date_dim
-    create_schema >> create_product_dim
-    create_schema >> create_user_dim
+        loaded_users = process_users(users_data)
+        loaded_products = process_products(products_data)
+        loaded_carts = process_carts(carts_data)
 
-    # dim create -> ilgili dim fill (aynı task'a ikinci bağımlılık)
-    create_product_dim >> product_filled
-    create_user_dim >> user_filled
-    create_date_dim >> date_filled
+        # staging tablolari yazmadan once hazir olmali
+        create_user_table >> loaded_users
+        create_products_table >> loaded_products
+        create_table >> loaded_carts
 
-    facts_filled = fill_facts()
+        # reject ve audit tablolari: uc process task'i da bunlara yaziyor
+        create_reject_table >> loaded_users
+        create_reject_table >> loaded_products
+        create_reject_table >> loaded_carts
+        create_audit_table >> loaded_users
+        create_audit_table >> loaded_products
+        create_audit_table >> loaded_carts
 
-    [product_filled, user_filled, date_filled] >> facts_filled
-    create_schema >> create_facts_a
-    create_facts_a >> facts_filled
+        # dim ve fact tablolari fakestore_warehouse semasinda
+        create_schema >> create_user_dim
+        create_schema >> create_product_dim
+        create_schema >> create_date_dim
+        create_schema >> create_facts_a
+
+        user_dimension_load = fill_user_dim()
+        product_dimension_load = fill_product_dim()
+        date_dimension_load = fill_date_dim()
+        facts_load = fill_facts()
+
+        # dim doldurma: tablo olusmus + staging dolmus olmali
+        create_user_dim >> user_dimension_load
+        loaded_users >> user_dimension_load
+
+        create_product_dim >> product_dimension_load
+        loaded_products >> product_dimension_load
+
+        create_date_dim >> date_dimension_load
+        loaded_carts >> date_dimension_load
+
+        # fact: tablo + stg_carts + uc dim'in surrogate key'leri hazir olmali
+        create_facts_a >> facts_load
+        loaded_carts >> facts_load
+        user_dimension_load >> facts_load
+        product_dimension_load >> facts_load
+        date_dimension_load >> facts_load
+
 
 fake_store_pipeline()

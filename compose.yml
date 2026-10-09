@@ -5,7 +5,7 @@ services:
            - ./dags:/opt/airflow/dags
         command: standalone
         ports:
-           - '8082:8080'
+           - '127.0.0.1:8082:8080'
         environment:
           AIRFLOW_CONN_POSTGRES: postgresql://${DB_USER}:${DB_PASSWORD}@fakestore_db:5432/${DB_NAME}
         depends_on:
@@ -27,6 +27,6 @@ services:
             timeout : 10s
             retries : 4
         ports:
-         - '5433:5432'
+         - '127.0.0.1:5433:5432'
 volumes:
    my_volume:
