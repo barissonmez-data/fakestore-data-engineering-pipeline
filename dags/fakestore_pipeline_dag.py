@@ -7,7 +7,7 @@ import logging
 from psycopg.types.json import Jsonb as Json
 
 # True: mock users + mock products test | False: full API -> staging -> dims -> facts DAG
-TEST_MODE = True
+TEST_MODE = False
 
 @dag
 def fake_store_pipeline():
@@ -250,9 +250,16 @@ def fake_store_pipeline():
                                    'number':10,  'zipcode':'12043'}
                          }
 
+        duplicate_user = {'id':2, 'email': 'burak@gmail.com',
+                      'username':'anissa', 'phone':'123456789' ,'name':{'firstname':'burak','lastname':'coskun'},
+                     'address':{  'city':'berlin','street':'neukoln',
+                                                        'number':10,  'zipcode':'12043'}}
 
 
-        return [valid_user,invalid_user]
+
+
+
+        return [valid_user,invalid_user,duplicate_user]
 
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
