@@ -8,6 +8,22 @@ Apache Airflow orchestrates the workflow, while Docker Compose runs Airflow and 
 
 ---
 
+## Pipeline Flow
+
+```text
+Fake Store API
+      ↓
+Apache Airflow
+      ↓
+Extract → Transform → Validate
+      ↓
+PostgreSQL Staging
+      ↓
+Dimensions and Fact Table
+```
+
+---
+
 ## Main Features
 
 - Extracts products, users, and carts from the Fake Store API
@@ -15,8 +31,9 @@ Apache Airflow orchestrates the workflow, while Docker Compose runs Airflow and 
 - Flattens nested JSON structures
 - Removes duplicate product and user records by ID
 - Removes duplicate cart lines using `cart_id + product_id`
-- Rejects records containing null values
-- Stores rejected records in `reject_table` with reason, source, timestamp, and record data
+- Rejects records with null required fields or identifiers
+- Stores rejected records in `reject_table`
+- Records pipeline-run metrics in `audit_table`
 - Loads cleaned data into PostgreSQL staging tables
 - Builds product, user, and date dimensions
 - Loads the final fact table using surrogate keys
@@ -31,20 +48,23 @@ Apache Airflow orchestrates the workflow, while Docker Compose runs Airflow and 
 
 The warehouse uses a dimensional model with:
 
-- `product_dim`
-- `user_dim`
-- `date_dim`
-- `facts_a`
+- `fakestore_warehouse.product_dim`
+- `fakestore_warehouse.user_dim`
+- `fakestore_warehouse.date_dim`
+- `fakestore_warehouse.facts_a`
 
 Staging tables:
 
-- `stg_products`
-- `stg_user`
-- `stg_carts`
+- `public.stg_products`
+- `public.stg_user`
+- `public.stg_carts`
 
-Rejected records are stored in `reject_table`.
+Operational tables:
 
-The current Airflow implementation uses a **full-refresh loading strategy**.
+- `public.reject_table`
+- `public.audit_table`
+
+The current Airflow implementation uses a full-refresh loading strategy.
 
 ---
 
@@ -52,7 +72,7 @@ The current Airflow implementation uses a **full-refresh loading strategy**.
 
 ### Transactional Loads
 
-Each staging, dimension, and fact-table load runs inside its own PostgreSQL transaction.
+Each staging, dimension, and fact-table load runs inside a PostgreSQL transaction.
 
 If a load succeeds, the transaction is committed. If an error occurs, the transaction is rolled back and the exception is raised again so Airflow can mark the task as failed.
 
@@ -72,6 +92,19 @@ The reject table stores:
 
 Reject handling is implemented for products, users, and cart lines.
 
+### Audit and Run Metrics
+
+The `audit_table` records pipeline metrics for each source:
+
+- execution timestamp
+- source name
+- extracted record count
+- accepted record count
+- rejected record count
+- pipeline status
+
+This makes successful and rejected records inspectable after each run.
+
 ### Row-Count Reconciliation
 
 For staging loads, the pipeline compares the number of accepted records with the number of rows actually loaded into PostgreSQL.
@@ -90,7 +123,7 @@ This prevents duplicate rows from accumulating across repeated full-refresh exec
 
 ## Docker Setup
 
-The project runs with two main services:
+The project runs with two main services.
 
 ### Airflow
 
@@ -98,7 +131,11 @@ Airflow runs the DAG and is built from the project `Dockerfile`.
 
 The local `./dags` directory is bind-mounted into the container, so DAG changes do not require rebuilding the Airflow image.
 
-The Airflow UI is available at `http://localhost:8082`.
+The Airflow UI is available at:
+
+```text
+http://localhost:8082
+```
 
 ### PostgreSQL
 
@@ -106,7 +143,11 @@ The warehouse runs on PostgreSQL 16 in a separate container.
 
 Warehouse data is stored in a named Docker volume so it survives normal container recreation.
 
-Airflow connects to PostgreSQL internally through `fakestore_db:5432`.
+Airflow connects to PostgreSQL internally through:
+
+```text
+fakestore_db:5432
+```
 
 A `pg_isready` health check ensures PostgreSQL is ready before Airflow starts.
 
@@ -182,6 +223,7 @@ PostgreSQL data remains in the named volume. Avoid `docker compose down -v` unle
 - **Health-based startup:** Airflow waits until PostgreSQL is ready
 - **Transactional loads:** failed database loads are rolled back
 - **Reject handling:** invalid records remain inspectable
+- **Audit table:** pipeline-run metrics are stored for later inspection
 - **Row-count validation:** silent data loss is detected instead of ignored
 
 ---
@@ -191,31 +233,79 @@ PostgreSQL data remains in the named volume. Avoid `docker compose down -v` unle
 Completed:
 
 - Transaction-based database loads
-- Rollback on failure
-- Error handling
+- Rollback on database failure
+- Null and duplicate validation
+- Reject table and rejected-record handling
+- Audit table with extracted, accepted, rejected, and status metrics
 - Row-count reconciliation
-- Reject table and reject handling
 - Operational logging
+- HTTP and task execution timeouts
+- Retry configuration
 - Full-refresh idempotency validation
+- Full API pipeline validation
+- Airflow mock validation for null and duplicate records
 
-Next:
+The final DAG configuration is:
 
-1. Audit / pipeline run table
-2. Referential integrity and stronger data-quality checks
-3. Incremental loading
-4. Unit and integration tests
-5. CI
-6. Failure notifications
+```python
+TEST_MODE = False
+```
+
+This runs the main API-to-warehouse pipeline. Mock mode was used only for local validation.
+
+---
+
+## Validation Evidence
+
+### Full API validation
+
+| Source | Extracted | Accepted | Rejected | Status |
+|---|---:|---:|---:|---|
+| users | 10 | 10 | 0 | success |
+| products | 20 | 20 | 0 | success |
+| carts | 14 | 14 | 0 | success |
+
+### Mock validation
+
+| Source | Extracted | Accepted | Rejected |
+|---|---:|---:|---:|
+| users | 3 | 1 | 2 |
+| products | 3 | 1 | 2 |
+
+Mock rejection reasons included null IDs and duplicate records.
+
+### Final database verification
+
+| Table | Rows |
+|---|---:|
+| `public.stg_user` | 10 |
+| `public.stg_products` | 20 |
+| `public.stg_carts` | 14 |
+| `fakestore_warehouse.user_dim` | 10 |
+| `fakestore_warehouse.product_dim` | 20 |
+| `fakestore_warehouse.facts_a` | 14 |
+| `fakestore_warehouse.date_dim` | 4 |
+
+The mock validation is an Airflow integration and behavior validation. Formal standalone `pytest` tests have not been implemented yet.
+
+---
+
+## Future Improvements
+
+- Referential-integrity and missing-dimension checks
+- Incremental loading with a watermark
+- Formal unit and integration tests with `pytest`
+- Continuous integration with GitHub Actions
+- Automated failure notifications
 
 ---
 
 ## Known Limitations
 
 - Airflow runs in `standalone` mode for local development
-- The current Airflow pipeline uses full-refresh loading
-- Historical run metrics are not yet stored in an audit table
+- The current pipeline uses full-refresh loading
 - Referential-integrity checks are not yet fully implemented
-- Automated tests and CI are not yet implemented
+- Formal standalone `pytest` tests and CI are not yet implemented
 - Failure notifications are not yet implemented
 
 ---
