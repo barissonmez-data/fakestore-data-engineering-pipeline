@@ -637,6 +637,37 @@ def fake_store_pipeline():
 
         logging.info('user_dim load completed successfully')
 
+    @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(seconds=40))
+    def check_integrity():
+        logging.info('Starting referential integrity check')
+        hook = PostgresHook(postgres_conn_id='postgres')
+        conn = hook.get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('''
+                INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
+                SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_user', NOW(), 'carts'
+                FROM stg_carts
+                LEFT JOIN fakestore_warehouse.user_dim
+                  ON stg_carts.userid = user_dim.userid
+                WHERE user_dim.userid IS NULL
+            ''')
+            cur.execute('''
+                INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
+                SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_product', NOW(), 'carts'
+                FROM stg_carts
+                LEFT JOIN fakestore_warehouse.product_dim
+                  ON product_dim.productid = stg_carts.productid
+                WHERE product_dim.productid IS NULL
+            ''')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        logging.info('Referential integrity check completed')
 
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=120))
     def fill_facts():
@@ -774,6 +805,13 @@ def fake_store_pipeline():
         user_dimension_load >> facts_load
         product_dimension_load >> facts_load
         date_dimension_load >> facts_load
+
+
+        integrity_check = check_integrity()
+        loaded_carts >> integrity_check
+        user_dimension_load >> integrity_check
+        product_dimension_load >> integrity_check
+        integrity_check >> facts_load
 
 
 fake_store_pipeline()
