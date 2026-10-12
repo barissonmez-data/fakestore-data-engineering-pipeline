@@ -2,7 +2,8 @@ services:
     airflow:
         build: .
         volumes:
-           - ./dags:/opt/airflow/dags
+           - ./dags:/opt/airflow/dags 
+           - ./tests:/opt/airflow/tests
         command: standalone
         ports:
            - '127.0.0.1:8082:8080'
