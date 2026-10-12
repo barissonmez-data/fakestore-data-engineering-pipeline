@@ -13,7 +13,7 @@ fakestore-repo-check/
 dags_backup/
 Dagdeneme.py
 Asset.py
-
+.vscode/
 config/
 
 config/airflow.cfg
