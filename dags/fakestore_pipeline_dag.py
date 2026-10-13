@@ -9,6 +9,83 @@ from psycopg.types.json import Jsonb as Json
 # True: mock users + mock products test | False: full API -> staging -> dims -> facts DAG
 TEST_MODE = False
 
+
+def ayir_products(fake_product):
+    yeni = []
+    reddedilen = []
+    gorulen = []
+
+    for product in fake_product:
+
+        rating = product['rating']
+        rate = rating['rate']
+        count = rating['count']
+        product['rate'] = rate
+        product['count'] = count
+        del product['rating']
+
+        if product['id'] not in gorulen:
+            tuple_hali = (
+                product['id'],
+                product['title'],
+                product['price'],
+                product['category'],
+                product['rate'],
+                product['count'],
+                product['image'],
+                product['description']
+            )
+            if None not in tuple_hali:
+                yeni.append(tuple_hali)
+                gorulen.append(product['id'])
+            else:
+                if product['id'] is None:
+                    reason = 'product_id_is_null'
+                elif product['title'] is None:
+                    reason = 'title_is_null'
+                elif product['price'] is None:
+                    reason = 'price_is_null'
+                elif product['category'] is None:
+                    reason = 'category_is_null'
+                elif product['rate'] is None:
+                    reason = 'rate_is_null'
+                elif product['count'] is None:
+                    reason = 'count_is_null'
+                elif product['image'] is None:
+                    reason = 'image_is_null'
+                elif product['description'] is None:
+                    reason = 'description_is_null'
+
+                reddedilen.append((
+                    product['id'], Json(product), reason,
+                    datetime.now(), 'products'
+                ))
+        else:
+            reddedilen.append((product['id'],Json(product),'duplicate',datetime.now(),'products'))
+
+    return yeni, reddedilen
+
+
+def ayir_integrity(conn):
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
+        SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_user', NOW(), 'carts'
+        FROM stg_carts
+        LEFT JOIN fakestore_warehouse.user_dim
+          ON stg_carts.userid = user_dim.userid
+        WHERE user_dim.userid IS NULL
+    ''')
+    cur.execute('''
+        INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
+        SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_product', NOW(), 'carts'
+        FROM stg_carts
+        LEFT JOIN fakestore_warehouse.product_dim
+          ON product_dim.productid = stg_carts.productid
+        WHERE product_dim.productid IS NULL
+    ''')
+
+
 @dag
 def fake_store_pipeline():
     create_table = SQLExecuteQueryOperator(retries=2,retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=20),
@@ -274,59 +351,15 @@ def fake_store_pipeline():
     def extract_carts(fake_carts):
         return fake_carts
 
+
+
     @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
     def process_products(fake_product):
-        yeni = []
-        reddedilen = []
-        gorulen = []
+
         logging.info(f'{len(fake_product)} product records, starting transformation and validation')
         extracted_products = len(fake_product)
-        for product in fake_product:
-            rating = product['rating']
-            rate = rating['rate']
-            count = rating['count']
-            product['rate'] = rate
-            product['count'] = count
-            del product['rating']
+        yeni, reddedilen = ayir_products(fake_product)
 
-            if product['id'] not in gorulen:
-                tuple_hali = (
-                    product['id'],
-                    product['title'],
-                    product['price'],
-                    product['category'],
-                    product['rate'],
-                    product['count'],
-                    product['image'],
-                    product['description']
-                )
-                if None not in tuple_hali:
-                    yeni.append(tuple_hali)
-                    gorulen.append(product['id'])
-                else:
-                    if product['id'] is None:
-                        reason = 'product_id_is_null'
-                    elif product['title'] is None:
-                        reason = 'title_is_null'
-                    elif product['price'] is None:
-                        reason = 'price_is_null'
-                    elif product['category'] is None:
-                        reason = 'category_is_null'
-                    elif product['rate'] is None:
-                        reason = 'rate_is_null'
-                    elif product['count'] is None:
-                        reason = 'count_is_null'
-                    elif product['image'] is None:
-                        reason = 'image_is_null'
-                    elif product['description'] is None:
-                        reason = 'description_is_null'
-
-                    reddedilen.append((
-                        product['id'], Json(product), reason,
-                        datetime.now(), 'products'
-                    ))
-            else:
-               reddedilen.append((product['id'],Json(product),'duplicate',datetime.now(),'products'))
         accepted_products = len(yeni)
         rejected_products = extracted_products - accepted_products
 
@@ -643,23 +676,7 @@ def fake_store_pipeline():
         hook = PostgresHook(postgres_conn_id='postgres')
         conn = hook.get_conn()
         try:
-            cur = conn.cursor()
-            cur.execute('''
-                INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
-                SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_user', NOW(), 'carts'
-                FROM stg_carts
-                LEFT JOIN fakestore_warehouse.user_dim
-                  ON stg_carts.userid = user_dim.userid
-                WHERE user_dim.userid IS NULL
-            ''')
-            cur.execute('''
-                INSERT INTO public.reject_table (record_id, raw_data, reason, rejected_at, source)
-                SELECT stg_carts.id, to_jsonb(stg_carts), 'unmatched_product', NOW(), 'carts'
-                FROM stg_carts
-                LEFT JOIN fakestore_warehouse.product_dim
-                  ON product_dim.productid = stg_carts.productid
-                WHERE product_dim.productid IS NULL
-            ''')
+            ayir_integrity(conn)
             conn.commit()
         except Exception:
             conn.rollback()
