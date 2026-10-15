@@ -7,12 +7,32 @@ import pytest
 
 dagBag = DagBag(dag_folder='/opt/airflow/dags')
 
+
+@pytest.fixture(autouse=True, scope='session')
+def tablo_olustur():
+    create_tasklar = ['create_table', 'create_products_table', 'create_user_table',
+                      'create_reject_table', 'create_audit_table']
+
+    dag_aktarma = dagBag.dags['fake_store_pipeline']
+    conn = PostgresHook(postgres_conn_id='postgres').get_conn()
+    cur = conn.cursor()
+
+    try:
+        for task in create_tasklar:
+            sql = dag_aktarma.get_task(task).sql
+            cur.execute(sql)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_airflow():
     assert len(dagBag.import_errors) == 0
     assert 'fake_store_pipeline' in dagBag.dag_ids
 
 
-def  test_duplicate():
+def test_duplicate():
     valid_product = {'rating': {'rate': 5, 'count': 3},
                      'id': 2, 'title': 'oyuncu', 'price': 32,
                      'category': 'game', 'image': 'bmel',
@@ -23,18 +43,16 @@ def  test_duplicate():
                          'category': 'game', 'image': 'bmel',
                          'description': 'gos'}
 
-    urunler = [valid_product,duplicate_product]
+    urunler = [valid_product, duplicate_product]
 
+    yeni, reddedilen = ayir_products(urunler)
 
-    yeni , reddedilen = ayir_products(urunler)
-
-    assert len(yeni)== 1
+    assert len(yeni) == 1
     assert len(reddedilen) == 1
-    assert reddedilen[0][2] =='duplicate'
+    assert reddedilen[0][2] == 'duplicate'
 
 
 def test_null():
-
     valid_product = {'rating': {'rate': 5, 'count': 3},
                      'id': 2, 'title': 'oyuncu', 'price': 32,
                      'category': 'game', 'image': 'bmel',
@@ -45,12 +63,11 @@ def test_null():
                        'category': 'gt', 'image': 'ops',
                        'description': 'gn'}
 
-
     urunler_d = [valid_product, invalid_product]
 
     yeni, reddedilen = ayir_products(urunler_d)
 
-    assert len(yeni)==1
+    assert len(yeni) == 1
     assert len(reddedilen) == 1
     assert reddedilen[0][2] == 'product_id_is_null'
 
@@ -76,7 +93,6 @@ def test_integrity():
         conn.close()
 
 
-
 def test_rollback():
     hook = PostgresHook(postgres_conn_id='postgres')
     conn = hook.get_conn()
@@ -92,7 +108,6 @@ def test_rollback():
 
     conn.commit()
 
-
     kullanicilar_hata = [
         {'id': 3, 'email': 'burak@gmail.com',
          'username': 'anissa', 'phone': '123456789',
@@ -101,11 +116,8 @@ def test_rollback():
                      'number': 'um', 'zipcode': '12043'}}
     ]
 
-
     with pytest.raises(Exception):
         process_users.function(kullanicilar_hata)
-
-
 
     cur.execute('SELECT COUNT(*) FROM stg_user')
     sayi = cur.fetchone()[0]
@@ -114,4 +126,3 @@ def test_rollback():
     assert sayi == len(kullanicilar)
     assert eslik == kullanicilar
     conn.close()
-
