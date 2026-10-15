@@ -14,7 +14,9 @@ jobs:
     steps:
         - uses: actions/checkout@v7
         - run:  docker compose up -d
-        - run:  echo ${#DB_NAME} ${#DB_USER}
-        - run:  docker compose exec fakestore_db psql -U $DB_USER -d postgres -Atc "select datname, length(datname) from pg_database"
-        - run:  docker compose exec -e "DB_NAME=$DB_NAME" airflow python -c "import os; from airflow.providers.postgres.hooks.postgres import PostgresHook; c=PostgresHook(postgres_conn_id='postgres').get_connection('postgres'); print(len(c.schema or ''), len(c.login or ''), c.schema == os.environ['DB_NAME'], c.schema == c.login)"
+        - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_table
+        - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_products_table
+        - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_user_table
+        - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_reject_table
+        - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_audit_table
         - run:  docker compose  exec  airflow pytest tests/test_dag.py
