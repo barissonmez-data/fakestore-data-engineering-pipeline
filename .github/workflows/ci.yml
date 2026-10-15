@@ -14,6 +14,7 @@ jobs:
     steps:
         - uses: actions/checkout@v7
         - run:  docker compose up -d
+        - run:  docker compose exec airflow airflow db check-migrations -t 300
         - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_table
         - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_products_table
         - run:  docker compose exec airflow airflow tasks test fake_store_pipeline create_user_table
