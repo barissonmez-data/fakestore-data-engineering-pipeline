@@ -11,7 +11,11 @@ dagBag = DagBag(dag_folder='/opt/airflow/dags')
 @pytest.fixture(autouse=True, scope='session')
 def tablo_olustur():
     create_tasklar = ['create_table', 'create_products_table', 'create_user_table',
-                      'create_reject_table', 'create_audit_table']
+                      'create_reject_table', 'create_audit_table',
+                      'create_schema',
+                      'create_date_dim', 'create_product_dim', 'create_user_dim',
+                      'create_facts_a']
+   
 
     dag_aktarma = dagBag.dags['fake_store_pipeline']
     conn = PostgresHook(postgres_conn_id='postgres').get_conn()
