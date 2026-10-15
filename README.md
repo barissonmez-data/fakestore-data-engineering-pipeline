@@ -78,16 +78,23 @@ Repeated full-refresh runs with the same input keep the warehouse row counts sta
 
 ## Testing and CI
 
-### DAG import test
+`tests/test_dag.py` contains five tests, run with pytest inside the Airflow container.
 
-`tests/test_dag.py` uses Airflow's `DagBag` to check that:
+| Test | What it checks |
+|---|---|
+| `test_airflow` | The DAG file loads without import errors and `fake_store_pipeline` is registered |
+| `test_duplicate` | `ayir_products` keeps one of two identical products and rejects the other as `duplicate` |
+| `test_null` | `ayir_products` rejects a product with a null ID as `product_id_is_null` |
+| `test_integrity` | `ayir_integrity` writes a cart line with no matching product to `reject_table` as `unmatched_product` |
+| `test_rollback` | When `process_users` fails mid-load, the error is raised and `stg_user` keeps exactly its previous rows (count and content) |
 
-- the DAG file loads without import errors
-- the `fake_store_pipeline` DAG is registered
+### Test database setup
 
-It checks that the DAG can be loaded. It does not run tasks or test their behavior.
+A session-scoped pytest fixture creates all staging, operational and warehouse tables before the tests run. It reads the `CREATE TABLE` statements from the DAG's create tasks (`dag.get_task(...).sql`) and runs them against PostgreSQL, so the test schema always matches the DAG without duplicating SQL.
 
-Run it inside the Airflow container:
+Tests clean up after themselves: `test_integrity` rolls back its changes, and `test_rollback` deletes its test rows in a `finally` block.
+
+`test_rollback` truncates `stg_user`, so the tests should only run against a disposable database, such as the one in CI.
 
 ```bash
 docker compose exec airflow pytest tests/test_dag.py
@@ -95,13 +102,13 @@ docker compose exec airflow pytest tests/test_dag.py
 
 ### Continuous integration
 
-GitHub Actions runs the test on every push (`.github/workflows/ci.yml`):
+GitHub Actions runs the tests on every push (`.github/workflows/ci.yml`):
 
 1. Check out the repository
 2. Build and start the services with Docker Compose
-3. Run the DAG import test inside the Airflow container
+3. Run the tests inside the Airflow container
 
-CI builds from the same `Dockerfile` as local development, so both use the same Airflow version.
+Each CI run starts with an empty PostgreSQL volume, so tests always run against a clean database. Credentials come from GitHub repository secrets. CI builds from the same `Dockerfile` as local development, so both use the same Airflow version.
 
 ---
 
@@ -187,8 +194,9 @@ To test reject handling, the DAG was run with mock input containing null IDs and
 ## Limitations and Next Steps
 
 - Airflow runs in `standalone` mode, which is meant for local development
-- Loading is full-refresh; incremental loading with a watermark is planned
-- Tests only cover DAG loading; behavior tests for the validation logic (e.g. reject handling) are not written yet
+- Loading is full-refresh; incremental loading is planned for a follow-up project
+- Tests cover the validation and rollback logic, not a full end-to-end DAG run
+- There is no separate test database on the server yet, so tests are meant to run in CI
 - No failure notifications yet
 
 ---
