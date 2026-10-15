@@ -86,6 +86,119 @@ def ayir_integrity(conn):
     ''')
 
 
+@task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
+def process_users(fake_user):
+    list_yeni = []
+    reddedilen = []
+    gorulen = []
+    logging.info(f'{len(fake_user)} user records, starting transformation and validation')
+    extracted_count = len(fake_user)
+
+    for user in fake_user:
+        name = user['name']
+        firstname = name['firstname']
+        lastname = name['lastname']
+        user['firstname'] = firstname
+        user['lastname'] = lastname
+
+        address = user['address']
+        city = address['city']
+        number = address['number']
+        street = address['street']
+        zipcode = address['zipcode']
+        user['city'] = city
+        user['number'] = number
+        user['street'] = street
+        user['zip'] = zipcode
+
+        if user['id'] not in gorulen:
+            tuple_hali = (
+                user['id'],
+                user['email'],
+                user['username'],
+                user['phone'],
+                user['firstname'],
+                user['lastname'],
+                user['city'],
+                user['street'],
+                user['number'],
+                user['zip']
+            )
+            if None not in tuple_hali:
+                list_yeni.append(tuple_hali)
+                gorulen.append(user['id'])
+            else:
+                if user['id'] is None:
+                    reason = 'user_id_is_null'
+                elif user['email'] is None:
+                    reason = 'email_is_null'
+                elif user['username'] is None:
+                    reason = 'username_is_null'
+                elif user['phone'] is None:
+                    reason = 'phone_is_null'
+                elif user['firstname'] is None:
+                    reason = 'firstname_is_null'
+                elif user['lastname'] is None:
+                    reason = 'lastname_is_null'
+                elif user['city'] is None:
+                    reason = 'city_is_null'
+                elif user['street'] is None:
+                    reason = 'street_is_null'
+                elif user['number'] is None:
+                    reason = 'number_is_null'
+                elif user['zip'] is None:
+                    reason = 'zip_is_null'
+
+                reddedilen.append((
+                    user['id'], Json(user), reason,
+                    datetime.now(), 'users'
+                ))
+        else:  # YENİ
+            reddedilen.append((user['id'], Json(user), 'duplicate', datetime.now(), 'users'))
+
+    accepted_user = len(list_yeni)
+    rejected_user = extracted_count - accepted_user
+
+    logging.info(
+        f'User reconciliation | '
+        f'extracted={extracted_count} | '
+        f'accepted={accepted_user} | '
+        f'rejected={rejected_user}'
+    )
+
+
+    hook = PostgresHook(postgres_conn_id='postgres')
+    conn = hook.get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('TRUNCATE TABLE stg_user')
+        cur.executemany('INSERT INTO stg_user (id, email, username, phone, firstname, lastname, city, street, number, zip) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', list_yeni)
+        cur.execute('SELECT COUNT(*) FROM stg_user')
+        loaded_user = cur.fetchone()[0]
+        if loaded_user != accepted_user:
+            raise ValueError(
+                f'stg_user count mismatch | '
+                f'accepted={accepted_user} | loaded={loaded_user}'
+            )
+        cur.execute("DELETE FROM reject_table WHERE source='users'")  # YENİ
+        cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)  # YENİ
+        cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+        (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'success')
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
+        (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'failed')
+        )
+        conn.commit()
+        raise
+    finally:
+        conn.close()
+
+    logging.info(f'{loaded_user} cleaned user records loaded into stg_user')
+
+
 @dag
 def fake_store_pipeline():
     create_table = SQLExecuteQueryOperator(retries=2,retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=20),
@@ -404,118 +517,6 @@ def fake_store_pipeline():
         logging.info(
             f'{loaded_products} cleaned product records loaded into stg_products'
         )
-
-    @task(retries=2, retry_delay=timedelta(minutes=2),execution_timeout=timedelta(seconds=60))
-    def process_users(fake_user):
-        list_yeni = []
-        reddedilen = []
-        gorulen = []
-        logging.info(f'{len(fake_user)} user records, starting transformation and validation')
-        extracted_count = len(fake_user)
-
-        for user in fake_user:
-            name = user['name']
-            firstname = name['firstname']
-            lastname = name['lastname']
-            user['firstname'] = firstname
-            user['lastname'] = lastname
-
-            address = user['address']
-            city = address['city']
-            number = address['number']
-            street = address['street']
-            zipcode = address['zipcode']
-            user['city'] = city
-            user['number'] = number
-            user['street'] = street
-            user['zip'] = zipcode
-
-            if user['id'] not in gorulen:
-                tuple_hali = (
-                    user['id'],
-                    user['email'],
-                    user['username'],
-                    user['phone'],
-                    user['firstname'],
-                    user['lastname'],
-                    user['city'],
-                    user['street'],
-                    user['number'],
-                    user['zip']
-                )
-                if None not in tuple_hali:
-                    list_yeni.append(tuple_hali)
-                    gorulen.append(user['id'])
-                else:
-                    if user['id'] is None:
-                        reason = 'user_id_is_null'
-                    elif user['email'] is None:
-                        reason = 'email_is_null'
-                    elif user['username'] is None:
-                        reason = 'username_is_null'
-                    elif user['phone'] is None:
-                        reason = 'phone_is_null'
-                    elif user['firstname'] is None:
-                        reason = 'firstname_is_null'
-                    elif user['lastname'] is None:
-                        reason = 'lastname_is_null'
-                    elif user['city'] is None:
-                        reason = 'city_is_null'
-                    elif user['street'] is None:
-                        reason = 'street_is_null'
-                    elif user['number'] is None:
-                        reason = 'number_is_null'
-                    elif user['zip'] is None:
-                        reason = 'zip_is_null'
-
-                    reddedilen.append((
-                        user['id'], Json(user), reason,
-                        datetime.now(), 'users'
-                    ))
-            else:  # YENİ
-                reddedilen.append((user['id'], Json(user), 'duplicate', datetime.now(), 'users'))
-
-        accepted_user = len(list_yeni)
-        rejected_user = extracted_count - accepted_user
-
-        logging.info(
-            f'User reconciliation | '
-            f'extracted={extracted_count} | '
-            f'accepted={accepted_user} | '
-            f'rejected={rejected_user}'
-        )
-
-
-        hook = PostgresHook(postgres_conn_id='postgres')
-        conn = hook.get_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute('TRUNCATE TABLE stg_user')
-            cur.executemany('INSERT INTO stg_user (id, email, username, phone, firstname, lastname, city, street, number, zip) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', list_yeni)
-            cur.execute('SELECT COUNT(*) FROM stg_user')
-            loaded_user = cur.fetchone()[0]
-            if loaded_user != accepted_user:
-                raise ValueError(
-                    f'stg_user count mismatch | '
-                    f'accepted={accepted_user} | loaded={loaded_user}'
-                )
-            cur.execute("DELETE FROM reject_table WHERE source='users'")  # YENİ
-            cur.executemany('INSERT INTO reject_table (record_id, raw_data, reason, rejected_at, source) VALUES (%s, %s, %s, %s, %s)', reddedilen)  # YENİ
-            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
-            (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'success')
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            cur.execute('INSERT INTO audit_table (run_at,source,extracted,accepted,rejected,status) VALUES (%s,%s,%s,%s,%s,%s)',
-            (datetime.now(), 'users', extracted_count, accepted_user, rejected_user, 'failed')
-            )
-            conn.commit()
-            raise
-        finally:
-            conn.close()
-
-        logging.info(f'{loaded_user} cleaned user records loaded into stg_user')
 
     @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(seconds=60))
     def process_carts(fake_carts):
